@@ -1,0 +1,5 @@
+<config>
+    <service ip="192.168.100.148" port="3333" />
+    <!-- <client   ip="192.168.100.148" port="3333"> -->
+    <nic vir="true" name="wg0" ip="10.0.0.1" mask="255.255.255.0"/>
+</config>
