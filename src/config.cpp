@@ -35,8 +35,10 @@ bool config::readConfig(const char *path)
         }
         else if(strcmp(node.name(), "client") == 0)
         {
-            m_clientip = node.attribute("ip").value();
-            m_cport    = node.attribute("port").as_uint();
+            client *cli = new client;
+            cli->m_clientip = node.attribute("ip").value();
+            cli->m_cport    = node.attribute("port").as_uint();
+            m_clients.insert(cli);
             m_clinet   = true;
         }
         else if(strcmp(node.name(), "nic") == 0)

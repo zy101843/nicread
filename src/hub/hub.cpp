@@ -385,10 +385,7 @@ int CHub::addData(uint8_t *data, int len, void *param)
     }
     else
     {
-        if (srcparam->linkType == 2)
-        {
-            printf("error \n");
-        }
+      
         locapPort = findPort(data);
         if (nullptr != locapPort && locapPort != portint)
         {
@@ -717,6 +714,10 @@ void CHub::justAddPort(void *port)
     {
         ((LinkParam *)(port))->addRef();
         m_portSet.insert(port);
+    }
+    else
+    {
+	printf("double add %ld\n",m_portSet.size());
     }
     m_critical.unlock();
 }

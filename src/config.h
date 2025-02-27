@@ -2,6 +2,14 @@
 
 #include <stdint.h>
 #include <string>
+#include <set>
+
+struct client
+{
+    std::string m_clientip;
+    uint16_t    m_cport;
+};
+
 class config
 {
 private:
@@ -15,9 +23,7 @@ public:
     std::string m_serviceip;
     uint16_t    m_sport;
     bool        m_sevice;
-
-    std::string m_clientip;
-    uint16_t    m_cport;
+    std::set<client*> m_clients;
     bool        m_clinet;
 
     bool         m_vir;

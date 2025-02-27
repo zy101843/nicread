@@ -43,6 +43,7 @@ void VNicMgn::workThread()
     int len;
     CHub *hub = (CHub*)m_hub;
     hub->addData(NULL, -1, &m_linkParm);
+    hub->updateMac(m_nic->m_mac, &m_linkParm);
     while (m_stop)
     {
         len = -1;
@@ -63,11 +64,6 @@ int VNicMgn::writeData(uint8_t * data, int len, int type,  void *srcparam, void 
 {
     //return 0;
     int wlen;
-    if (type == 3)
-    {
-        wlen = m_nic->writeData(data, len);
-        return wlen;
-    }
     if (srcparam == dstParam)
     {
         return 0;

@@ -98,8 +98,9 @@ public:
     int addData(uint8_t *data, int len, void *param);
     int sendToAllPort(uint8_t *data, int len, void *param);
     int cleanLink(void *param);
+    int updateMac(uint8_t *data, void *param);
 private:
-    int   updateMac(uint8_t *data, void *param);
+    //int   updateMac(uint8_t *data, void *param);
     void *findPort(uint8_t *data);
     void  justAddPort(void *param);
 private:

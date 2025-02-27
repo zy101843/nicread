@@ -64,8 +64,17 @@ void createThread(void *arg)
  rc->decrypt_decrypt(data1, 13, data2);
  */
 
-int main()
+int main(int argc, char* argv[])
 {
+    int bakRun= 0;
+    if (argc >= 2)
+    {
+        if (0 == strcmp(argv[1], "daemon") || 0 == strcmp(argv[1], "d"))
+        {
+            daemon(1, 0);
+            bakRun = 1;
+        }
+    }
 
     config *cfg = new config();
     bool readconfig = cfg->readConfig("./config.xml");
@@ -108,7 +117,14 @@ int main()
 
     if (cfg->m_clinet)
     {
-        netwokr->addConnect(cfg->m_clientip.c_str(), cfg->m_cport, 2, hub);
+        std::set<client*>::iterator iter = cfg->m_clients.begin(); 
+        std::set<client*>::iterator end  = cfg->m_clients.end();
+        for(;iter != end ; iter++)
+        { 
+            client *cli = *iter;
+            //netwokr->addConnect(cfg->m_clientip.c_str(), cfg->m_cport, 2, hub);
+            netwokr->addConnect(cli->m_clientip.c_str(), cli->m_cport, 2, hub);
+        }
     }
 
     while (1)

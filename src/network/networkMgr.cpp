@@ -277,14 +277,14 @@ void CNetworkMgr::TimeOutThread()
     {
         std::time_t times=time(NULL);
         m_CriticalLink.lock();
-        if (m_timeOut.size() > 0)
+        /*if (m_timeOut.size() > 0)
         {
             begin = m_timeOut.begin();
             end   = m_timeOut.end();
             for (; begin != end; begin++)
             {
                 item = *begin;
-                if ((times - item->m_lastTime) < 60)
+                if ((times - item->m_lastTime) < 3600)
                 {
                     break;
                 }
@@ -305,7 +305,7 @@ void CNetworkMgr::TimeOutThread()
                 m_timeOut.erase(m_timeOut.begin(), begin);
             }
         }
-
+        */
         countclint = 0;
         if (m_addConnect.size() > 0)
         {
@@ -482,7 +482,7 @@ int  CNetworkMgr::handAccep(CLinkPeer * linkPeer)
     peer->addRef();  
 
     uint8_t *pi = (uint8_t *)&(peer->m_ipaddr.ipv4);
-    NOTICE("socket rec: " << (uint32_t)pi[0]<<","<< (uint32_t)pi[1]<<","<< (uint32_t)pi[2]<<"," << (uint32_t)pi[3] <<" port: "<< peer->m_port<< " new socket!");
+    NOTICE("socket rec: " << (uint32_t)pi[0]<<"."<< (uint32_t)pi[1]<<"."<< (uint32_t)pi[2]<<"." << (uint32_t)pi[3] <<" port: "<< peer->m_port<< " new socket!");
 
     upTimeLink(peer);
 
@@ -579,7 +579,7 @@ int CNetworkMgr::readData(CLinkPeer *linkPeer)
             {
                 m_BufMgn->FreeBufItem(item);
             }
-            upTimeLink(linkPeer);
+            //upTimeLink(linkPeer);
             return readLen;
         }
         else if (readLen == 2048)
@@ -615,7 +615,7 @@ int  CNetworkMgr::decRefLink(CLinkPeer *linkPeer)
     {
         cleanLineBuf(linkPeer);
         uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
-        NOTICE("clean socket close type: "<<linkPeer->m_linkType<<" ip:"<< (uint32_t)pi[0] << "," << (uint32_t)pi[1] << "," << (uint32_t)pi[2] << "," << (uint32_t)pi[3] << " port: " << htons(linkPeer->m_port) <<"  function: " << __FUNCTION__);
+        NOTICE("clean socket close type: "<<linkPeer->m_linkType<<" ip:"<< (uint32_t)pi[0] << "." << (uint32_t)pi[1] << "." << (uint32_t)pi[2] << "." << (uint32_t)pi[3] << " port: " << linkPeer->m_port <<"  function: " << __FUNCTION__);
         delete linkPeer;
         m_links--;
     }
