@@ -3,10 +3,12 @@
 #include <list>
 #include <mutex>
 #include "ByteStream.h"
+#include "ByteBufMgn.h"
 
 union IPADDR
 {
     uint32_t ipv6[4];
+    uint16_t ipv6s[8];
     uint32_t ipv4;
 };
 enum PEERTYPE
@@ -34,20 +36,42 @@ public:
     virtual ~CLinkPeer();
 public :
     void setMessageRoute(void *messageRoute);
+    void setUpClose();
 public:
     void lock() { m_Critical.lock(); };
     void unlock() { m_Critical.unlock(); }
     bool addItem(CByteStream::CBufferItem* pItem);
-    int  prepare(CByteStream::CBufferItem* pItem);
-    int  regtoUp(void *mgr);
+    int  prepare(int len);
+    int  regtoUp(void *mgr, int type);
+    int  setBufMgn(ByteBufMgn *bufMgn);
     CByteStream::CBufferItem* getItem();
     int addRef();
     int delRef();
     bool isConnect()
     {
-        return m_connect;
+        return m_connect.load();
     }
-    bool setConnect(bool connet);
+    bool setConnect(bool connet)
+    {
+        m_connect.store(connet);
+        if(connet == false)
+        {
+            setUpClose();
+        }
+        return connet;
+    }
+    bool getOther()
+    {
+        return m_outherSet.load();
+    }
+    bool setother(bool connet)
+    {
+        m_outherSet.store(connet);
+        return connet;
+    }
+public:
+    std::size_t getItemSize();
+    int cleanLineBuf();
 public:
     enum 
     {
@@ -63,6 +87,7 @@ public:
     int           m_fd;
     IPADDR        m_ipaddr;
     uint16_t      m_port;
+    uint16_t      m_bindport;  
     bool          m_isV6;
     PEERTYPE      m_peerTyep;
     int           m_linkType;
@@ -73,14 +98,21 @@ public:
     uint8_t      *m_leftData;
     uint32_t      m_lefLen;
     uint32_t      m_curLen;
-    bool          m_sending;
-    bool          m_connect;
     int           m_curMsgLen;
-    std::mutex  m_Critical;
+    std::mutex    m_Critical;
+    std::mutex    m_SendCritical;
     std::atomic<int> m_ref;
-    void          *m_linstUDP;
-    void          *m_otherParam;
+    void *m_linstUDP;
+    void *m_otherParam;
+    uint8_t m_mac[6];
+    uint32_t m_id;  
+
+private:
+    std::atomic<bool> m_connect;
+    std::atomic<bool> m_outherSet; //for sendata flag 
+    ByteBufMgn        *m_BufMgn;   
 public:
-    std::list<CLinkPeer*>::iterator m_iter;
-    std::time_t                     m_lastTime;
+    std::list<CLinkPeer *>::iterator m_iter;
+    bool                             m_alreInser;
+    std::time_t m_lastTime;
 };

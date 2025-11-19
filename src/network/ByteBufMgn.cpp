@@ -28,3 +28,14 @@ void ByteBufMgn::FreeBufItem(CByteStream::CBufferItem *item)
     m_ByteStram.FreeBufferItem(item);
     m_Critical.unlock();
 }
+int ByteBufMgn::delBufRef(CByteStream::CBufferItem *item)
+{
+    int ref = item->delRef();
+    if (0 == ref)
+    {
+        m_Critical.lock();
+        m_ByteStram.FreeBufferItem(item);
+        m_Critical.unlock();
+    }
+    return ref;
+}

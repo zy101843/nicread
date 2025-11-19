@@ -14,3 +14,5 @@ bool fileExits(char *fileName);
 uint32_t alignment64bitSize(uint32_t t);
 uint32_t getBit(uint32_t input, uint32_t &size);
 int WriteFileAddStr(char *pFilePath, char *pData, int nDataLen);
+
+

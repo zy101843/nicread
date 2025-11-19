@@ -1,0 +1,7 @@
+<config>
+  <nic name="eno1"  gateway="00:e4:06:a0:7d:a6" ip="192.168.200.163" />
+  <nat ip="172.16.3.1" mask="255.255.255.0" mac="18:9b:a5:81:f2:b3"/>
+  <port protocol="6" protocolname="tcp" start="10000" end="30000" />
+  <port protocol="17" protocolname="udp" start="10000" end="30000" />
+  <timeout tcp="300" udp="180" />
+</config>

@@ -95,20 +95,20 @@ int buf_ipv6(uint8_t *buf, int len, ip_tr_addr &add)
         if (ch >= '0' && ch <= '9')
         {
             data = ch - '0';
-            add.v6c[curPost] <= 4;
+            add.v6c[curPost] <<= 4;
             add.v6c[curPost] |= data;
 
         }
         else if (ch >= 'a' && ch <= 'f')
         {
             data = ch - 'a';
-            add.v6c[curPost] <= 4;
+            add.v6c[curPost] <<= 4;
             add.v6c[curPost] |= data;
         }
         else if (ch >= 'A' && ch <= 'F')
         {
             data = ch - 'A';
-            add.v6c[curPost] <= 4;
+            add.v6c[curPost] <<= 4;
             add.v6c[curPost] |= data;
         }
         else if (':' == ch)

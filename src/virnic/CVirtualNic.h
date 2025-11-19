@@ -16,7 +16,7 @@ class CVirtualNic
 public:
     enum
     {
-        BUFF_SEND_SIZE = 4096,
+        BUFF_SEND_SIZE = 64*1024,
     };
 
 public:
@@ -25,7 +25,7 @@ public:
 
     public:
 
-    bool Create(const std::string &devName, const std::string &ip, const std::string &mask);
+    bool Create(const std::string &devName, const std::string &ip, const std::string &mask,const uint8_t *mac);
     uint8_t *readData(int &len);
     int writeData(const uint8_t *buffer, int len);
 

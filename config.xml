@@ -1,5 +1,11 @@
 <config>
-    <service ip="192.168.100.148" port="3333" />
-    <!-- <client   ip="192.168.100.148" port="3333"> -->
-    <nic vir="true" name="wg0" ip="10.0.0.1" mask="255.255.255.0"/>
+  <service ip="::" port="37702" />
+  <service ip="192.168.0.251" port="37702" />
+  <!-- <client ip="192.168.100.213" port="37702" bindport="37702" mac="5a:43:e4:82:f5:80"/> -->
+  <client ip="203.174.83.116" port="62776"  mac="d6:2c:2b:9f:9b:f9" id="1963963426" count="2"/>
+  <!-- <nic vir="no" name="eno2" ip="192.168.0.0" mask="255.255.255.0" filter="true" mac="a0:1b:21:a5:59:4f"/> -->
+  <nic vir="true" name="my0" ip="192.168.3.1" mask="255.255.255.0" filter="true" />
+  <!-- <nic vir="no" name="eno2" ip="192.168.0.0" mask="255.255.255.0" filter="true" mac=" 00:1b:21:a5:59:4f"/>  -->
+  <nat   open="false" />
+  <route open="false" />
 </config>

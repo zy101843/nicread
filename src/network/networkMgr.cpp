@@ -10,6 +10,23 @@
 //#include "log.h"
 
 
+
+unsigned char arp_data[] = 
+{
+    0xf6, 0xe1, 0xbe, 0xed, 0xe6, 0xdc, 
+    0x00, 0xff, 0x5c, 0xdf, 0x90, 0x0c, 
+    0x08, 0x06, 
+    0x00, 0x01, 
+    0x08, 0x00, 
+    0x06, 
+    0x04, 
+    0x00, 0x01, 
+    0x00, 0xff, 0x5c, 0xdf, 0x90, 0xc, 
+    0xac, 0x10, 0x03, 0x17, 
+    0xf6, 0xe1, 0xbe, 0xed, 0xe6, 0xdc, 
+    0xac, 0x10, 0x3, 0xfa
+};
+
 CNetworkMgr::CNetworkMgr()//: m_ByteStrem(1000, 64*1024)
 {
     m_epoll.init();
@@ -67,13 +84,13 @@ void *CNetworkMgr::addListen(const char *ip, uint16_t port)
     servaddr.sin_port        = htons(port);
 
     int reeuseport_On = 1;
-    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &reeuseport_On, sizeof(reeuseport_On)) < 0)
+    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR|SO_REUSEPORT, &reeuseport_On, sizeof(reeuseport_On)) < 0)
     {
         printf("setsockopt error: errno=%d, errorinfo:%s. \n", errno, strerror(errno));
         return NULL;
     }
     bind(listenfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
-    listen(listenfd, 20);
+    listen(listenfd, 5);
     if (!SetNonBlocking(listenfd))
     {
         printf( "SetNonBlocking error listenfd.\n");
@@ -81,6 +98,7 @@ void *CNetworkMgr::addListen(const char *ip, uint16_t port)
     }
     uint32_t  flag  = EPOLLIN;
     CLinkPeer *peer = new CLinkPeer();
+    peer->setBufMgn(m_BufMgn);
     peer->setMessageRoute(m_distri);
     m_links++;
    
@@ -89,40 +107,205 @@ void *CNetworkMgr::addListen(const char *ip, uint16_t port)
     m_epoll.addEnv(flag, listenfd, peer);
     peer->m_peerTyep    = PEERTYPE_LINST;
     peer->m_ipaddr.ipv4 = servaddr.sin_addr.s_addr;
+    peer->m_isV6        = false;
     m_listenfd.insert(listenfd);
 
     return peer;
 }
+
+void *CNetworkMgr::addListenV6(const char *ip, uint16_t port)
+{
+    int listenfd = socket(AF_INET6, SOCK_STREAM, 0);
+    struct sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(port);
+    inet_pton(AF_INET6, ip, &addr.sin6_addr);
+    //addr.sin6_addr = in6addr_any;
+    
+    int reeuseport_On = 1;
+    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR|SO_REUSEPORT, &reeuseport_On, sizeof(reeuseport_On)) < 0)
+    {
+        printf("setsockopt error: errno=%d, errorinfo:%s. \n", errno, strerror(errno));
+        return NULL;
+    }
+    int flagv6 = 1; // 0 means v6 and v4, 1 means only v6
+    if (setsockopt(listenfd, IPPROTO_IPV6, IPV6_V6ONLY, &flagv6, sizeof(flagv6)) < 0)
+    {
+        perror("setsockopt");
+        exit(1);
+    }
+    bind(listenfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_in6));
+    listen(listenfd, 5);
+
+    if (!SetNonBlocking(listenfd))
+    {
+        printf( "SetNonBlocking error listenfd.\n");
+        return NULL;
+    }
+    printf("Listening on [%s]:%d ...\n", ip, port);
+    uint32_t  flag  = EPOLLIN;
+    CLinkPeer *peer = new CLinkPeer();
+    peer->setBufMgn(m_BufMgn);
+    peer->setMessageRoute(m_distri);
+    m_links++;
+   
+    peer->m_fd         = listenfd;
+    peer->m_linkType   = IP_TCP_TYPE;
+    m_epoll.addEnv(flag, listenfd, peer);
+    peer->m_peerTyep    = PEERTYPE_LINST;
+    peer->m_isV6        = true;
+    memcpy(peer->m_ipaddr.ipv6, addr.sin6_addr.s6_addr, sizeof(peer->m_ipaddr.ipv6));
+
+    m_listenfd.insert(listenfd);
+    return peer;
+}
+
 void *CNetworkMgr::addConnect(ADDNETPort *item)
 {
-    return addConnect(item->ip, item->port, item->type, item->dist);
+    if (item->isV6)
+    {
+        return addConnectV6(item->ip.ipv6, item->port, item->type, item->bindport, item->dist, item->mac ,item->id);
+    }
+    else
+    {
+        return addConnect(item->ip.ipv4, item->port, item->type, item->bindport, item->dist, item->mac, item->id);
+    }
 }
 
-void *CNetworkMgr::addConnect(const char *ip, uint16_t port,  int type, void *dist)
+void *CNetworkMgr::addConnect(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id)
 {
-    uint32_t addr = inet_addr(ip);
-    uint16_t nport =  htons(port);
-    return addConnect(addr,  nport, type, dist);
+    uint32_t addr  = inet_addr(ip);
+    uint16_t nport = htons(port);
+    return addConnect(addr,  nport, type, htons(bindport), dist, mac, id);
 }
 
-void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, void *dist)
+   
+void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id)
 {
-     struct sockaddr_in servaddr;
+    struct sockaddr_in servaddr;
     int sock_cli        = socket(AF_INET, SOCK_STREAM, 0);
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = ip;
     servaddr.sin_port        = port;
+   
+    if (!SetNonBlocking(sock_cli))
+    {
+        printf("SetNonBlocking error listenfd.\n");
+        close(sock_cli);
+        return NULL;
+    }
+
+    int reeuseport_On = 1;
+    if (setsockopt(sock_cli, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &reeuseport_On, sizeof(reeuseport_On)) < 0)
+    {
+        printf("setsockopt error: errno=%d, errorinfo:%s. \n", errno, strerror(errno));
+        return NULL;
+    }
+
+    if (bindport)
+    {
+        struct sockaddr_in addr = {0};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = bindport;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        if (bind(sock_cli, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        {
+            perror("bind outgoing port");
+            return NULL;
+        }
+    }
+
+    CLinkPeer *peer = new CLinkPeer();
+    peer->setBufMgn(m_BufMgn);
+    peer->setMessageRoute(m_distri);
+    m_links++;
+
+    uint32_t  flag      = EPOLLOUT | EPOLLRDHUP |EPOLLERR;
+    peer->m_linkType    = IP_TCP_TYPE;
+    peer->m_fd          = sock_cli;
+    peer->m_step        = PEERSTEP::PEERSTEP_CONECT;
+    peer->m_peerTyep    = PEERTYPE_CLIENT;
+    peer->m_ipaddr.ipv4 = ip;
+    peer->m_isV6        = false;
+    peer->m_port        = port;
+    peer->m_bindport    = bindport;
+    peer->m_proto       = type;
+    peer->m_id          = id;   
+    memcpy(peer->m_mac, mac, sizeof(peer->m_mac));
+    peer->setMessageRoute(dist);
+    peer->addRef();
+
+    int syncnt = 3;
+    setsockopt(sock_cli, IPPROTO_TCP, TCP_SYNCNT, &syncnt, sizeof(syncnt));
+    int ret = connect(sock_cli, (struct sockaddr *)&servaddr, sizeof(servaddr));
+
+    if (ret == 0)
+    {
+        printf("connect immediately success\n");
+    }
+    else if (ret < 0 && errno != EINPROGRESS)
+    {
+        perror("connect");
+        handEPOLLRDHUP(peer);
+        return peer;
+    }
+
+    m_CriticalEpoll.lock();
+    m_epoll.addEnv(flag, sock_cli, peer);
+    m_CriticalEpoll.unlock();
+    return peer;
+}
+
+void *CNetworkMgr::addConnectV6(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id)
+ {
+    struct in6_addr in6addr;
+    inet_pton(AF_INET6, ip, &in6addr);
+    uint16_t nport = htons(port);
+    return addConnectV6(in6addr.s6_addr32, nport, type, htons(bindport), dist, mac, id);
+ }
+
+ void *CNetworkMgr::addConnectV6(uint32_t *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac,  uint32_t id)
+{
+    struct sockaddr_in6 servaddr;
+    int sock_cli        = socket(AF_INET6, SOCK_STREAM, 0);
+    servaddr.sin6_family = AF_INET6;
+    memcpy(servaddr.sin6_addr.s6_addr , ip, sizeof(servaddr.sin6_addr));
+    servaddr.sin6_port        = port;
 
     if (!SetNonBlocking(sock_cli))
     {
         printf("SetNonBlocking error listenfd.\n");
+        close(sock_cli);
         return NULL;
     }
-    
+
+    int reeuseport_On = 1;
+    if (setsockopt(sock_cli, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &reeuseport_On, sizeof(reeuseport_On)) < 0)
+    {
+        printf("setsockopt error: errno=%d, errorinfo:%s. \n", errno, strerror(errno));
+        return NULL;
+    }
+
+    if (bindport)
+    {
+        struct sockaddr_in6  addr = {0};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port   = bindport;
+
+        if (bind(sock_cli, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        {
+            perror("bind outgoing port");
+            return NULL;
+        }
+    }
+
     int syncnt = 3;
     setsockopt(sock_cli, IPPROTO_TCP, TCP_SYNCNT, &syncnt, sizeof(syncnt));
     connect(sock_cli, (struct sockaddr *) & servaddr, sizeof(servaddr));
+ 
     CLinkPeer *peer = new CLinkPeer();
+    peer->setBufMgn(m_BufMgn);
     peer->setMessageRoute(m_distri);
     m_links++;
 
@@ -131,12 +314,16 @@ void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, void *dist)
     peer->m_fd          = sock_cli;
     peer->m_step        = PEERSTEP::PEERSTEP_CONECT;
     peer->m_peerTyep    = PEERTYPE_CLIENT;
-    peer->m_ipaddr.ipv4 = ip;
+    memcpy(peer->m_ipaddr.ipv6, ip, sizeof(peer->m_ipaddr.ipv6));
+    peer->m_isV6        = true; 
     peer->m_port        = port;
+    peer->m_bindport    = bindport;
     peer->m_proto       = type;
+    peer->m_linkType    = 2;
+    peer->m_id          = id;
+    memcpy(peer->m_mac, mac, sizeof(peer->m_mac));
     peer->setMessageRoute(dist);
     peer->addRef();
-
 
     m_CriticalEpoll.lock();
     m_epoll.addEnv(flag, sock_cli, peer);
@@ -148,13 +335,13 @@ void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, void *dist)
 
 void *CNetworkMgr::addUDPConnect(ADDNETPort *item)
 {
-    return addUDPConnect(item->ip, item->port, item->type, item->dist);
+    return addUDPConnect(item->ip.ipv4, item->port, item->type, item->dist);
 }
 
 void *CNetworkMgr::addUDPConnect(const char *ip, uint16_t port, int type, void *dist)
 {
     uint32_t addr  = inet_addr(ip);
-    uint16_t nport =  htons(port);
+    uint16_t nport = htons(port);
     return addUDPConnect(addr, nport, type, dist);
 }
 
@@ -171,6 +358,7 @@ void *CNetworkMgr::addUDPConnect(uint32_t ip, uint16_t port, int type, void *dis
     int sock_cli        = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   
     CLinkPeer *peer = new CLinkPeer();
+    peer->setBufMgn(m_BufMgn);
     peer->setMessageRoute(m_distri);
     m_links++;
 
@@ -179,7 +367,6 @@ void *CNetworkMgr::addUDPConnect(uint32_t ip, uint16_t port, int type, void *dis
     peer->m_fd          = sock_cli;
     peer->m_step        = PEERSTEP::PEERSTEP_CONECT;
     peer->m_peerTyep    = PEERTYPE_UDPCLINENT;
-    peer->m_ipaddr.ipv4 = ip;
     peer->m_port        = port;
     peer->m_proto       = type;
     peer->setMessageRoute(dist);
@@ -239,6 +426,7 @@ void *CNetworkMgr::addUdpRec(const char *ip, uint16_t port)
   
     uint32_t  flag   = EPOLLIN | EPOLLRDHUP; /*|EPOLLOUT|EPOLLRDHUP | EPOLLONESHOT*/;
     CLinkPeer *peer  = new CLinkPeer();
+    peer->setBufMgn(m_BufMgn);
     peer->setMessageRoute(m_distri);
     m_links++;
     peer->m_linkType    = IP_UDP_TYPE;
@@ -273,23 +461,32 @@ void CNetworkMgr::TimeOutThread()
 
     std::vector<ADDNETPort *>  udpClinetList;
     std::vector<CLinkPeer *>   linkTime;
+    m_timeBig = 0;
     while (m_stop)
     {
         std::time_t times=time(NULL);
         m_CriticalLink.lock();
-        /*if (m_timeOut.size() > 0)
+        if (m_timeOut.size() > 0)
         {
             begin = m_timeOut.begin();
             end   = m_timeOut.end();
+            std::size_t curCout =  m_timeOut.size();
             for (; begin != end; begin++)
             {
                 item = *begin;
-                if ((times - item->m_lastTime) < 3600)
+                std::time_t dst = times - item->m_lastTime;
+                if (dst < 600)
                 {
+                    if(dst > m_timeBig) 
+                    {
+                        m_timeBig = dst;
+                        printf("time big %ld %ld\n", m_timeBig, curCout);
+                    }
                     break;
                 }
                 count++;
                 setIter = m_client.find(item);
+
                 if (setIter != m_client.end())
                 {
                     m_client.erase(setIter);
@@ -305,7 +502,7 @@ void CNetworkMgr::TimeOutThread()
                 m_timeOut.erase(m_timeOut.begin(), begin);
             }
         }
-        */
+
         countclint = 0;
         if (m_addConnect.size() > 0)
         {
@@ -365,8 +562,9 @@ void CNetworkMgr::TimeOutThread()
 
         sleep(5);
     }
-   
 }
+
+
 
 void CNetworkMgr::MonitorThread()
 {
@@ -442,77 +640,145 @@ void CNetworkMgr::MonitorThread()
                 handEPOLLRDHUP(fdper);
                 continue;
             }
-
         }
     }
 }
-
+ int CNetworkMgr::setMdNew(CLinkPeer *linkPeer)
+ {
+    uint32_t  flag  = EPOLLIN|EPOLLOUT| EPOLLRDHUP;
+    m_CriticalEpoll.lock();
+    m_epoll.addEnv(flag, linkPeer->m_fd, linkPeer);
+    m_CriticalEpoll.unlock();
+    return 1;
+ }
 int  CNetworkMgr::handAccep(CLinkPeer * linkPeer)
 {
-    sockaddr_in cliaddr;
-    socklen_t   clilen = sizeof(cliaddr);
+
     int connfd = -1;
+    char client_ip[INET6_ADDRSTRLEN];  
+    
+    struct sockaddr_storage client_addr;  
+    socklen_t addr_len = sizeof(client_addr);
+
+
     while (-1 == connfd)
     {
-        connfd = accept(linkPeer->m_fd, (struct sockaddr*) & cliaddr, &clilen);
+        connfd = accept(linkPeer->m_fd, (struct sockaddr*) & client_addr, &addr_len);
         if (-1 == connfd)
         {
             //printf("accept error: errno=%d, errorinfo:%s. \n", errno, strerror(errno));
         }
     }
+
+
+
     if (!SetNonBlocking(connfd))
     {
         close(connfd);
-        //printf("SetNonBlocking error accept.\n");
         return -1; 
     }
-    
-    uint32_t  flag      = EPOLLIN | EPOLLRDHUP; /*|EPOLLOUT|EPOLLRDHUP | EPOLLONESHOT*/;
+    bool isV6 = false;
+    uint16_t port = 0;
+    uint32_t ip[4] = {0};
+    if (client_addr.ss_family == AF_INET)
+    {
+        struct sockaddr_in *addr_in = (struct sockaddr_in *)&client_addr;
+        inet_ntop(AF_INET, &addr_in->sin_addr, client_ip, sizeof(client_ip));
+        printf("socket rec: %s:%d\n", client_ip, ntohs(addr_in->sin_port));
+        ip[0] = addr_in->sin_addr.s_addr;
+        isV6 = false;
+        port = addr_in->sin_port;
+    }
+    else if (client_addr.ss_family == AF_INET6)
+    {
+        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&client_addr;
+        inet_ntop(AF_INET6, &addr_in6->sin6_addr, client_ip, sizeof(client_ip));
+        if (IN6_IS_ADDR_V4MAPPED(&addr_in6->sin6_addr))
+        {
+            printf("socket rec: IPv4 map IPv6  %s:%d\n", client_ip, ntohs(addr_in6->sin6_port));
+        }
+        else
+        {
+            printf("socket rec: IPv6  %s:%d\n", client_ip, ntohs(addr_in6->sin6_port));
+        }
+        port = addr_in6->sin6_port;
+        memcpy(ip, addr_in6->sin6_addr.s6_addr, sizeof(ip));
+        isV6 = true;
+    }
+    else
+    {
+        printf("error type\n");
+    }
+
+
     CLinkPeer *peer     = new CLinkPeer();
+    peer->setBufMgn(m_BufMgn);
     peer->setMessageRoute(m_distri);
     m_links++;
     
     peer->m_fd          = connfd;
     peer->m_peerTyep    = PEERTYPE_SERVICE;
-    peer->m_ipaddr.ipv4 = cliaddr.sin_addr.s_addr;
-    peer->m_port        = htons(cliaddr.sin_port);
+    memcpy(peer->m_ipaddr.ipv6, ip, sizeof(peer->m_ipaddr.ipv6));
+    peer->m_port        = htons(port);
+    peer->m_isV6        = isV6;
     peer->setConnect(true);
     peer->m_proto       = linkPeer->m_proto;
     peer->m_linkType    = IP_TCP_TYPE;
     peer->addRef();  
 
-    uint8_t *pi = (uint8_t *)&(peer->m_ipaddr.ipv4);
-    NOTICE("socket rec: " << (uint32_t)pi[0]<<"."<< (uint32_t)pi[1]<<"."<< (uint32_t)pi[2]<<"." << (uint32_t)pi[3] <<" port: "<< peer->m_port<< " new socket!");
-
     upTimeLink(peer);
-
-    int ref = peer->regtoUp(this);
-    m_CriticalEpoll.lock();
-    m_epoll.addEnv(flag, connfd, peer);
-    m_CriticalEpoll.unlock();
+    peer->regtoUp(this, 1);
+    setMdNew(peer);
     return 1;
 
 }
 
 int CNetworkMgr::handConnect(CLinkPeer *linkPeer)
 {
-    bool connect= 0;
-    linkPeer->lock();
+
+    struct sockaddr_in peer;
+    struct sockaddr_in local;
+    socklen_t len = sizeof(peer);
+
+    if (getsockname(linkPeer->m_fd, (struct sockaddr *)&local, &len) == 0)
+    {
+
+        printf("socket local is connected to %s:%d\n", inet_ntoa(local.sin_addr), ntohs(local.sin_port));
+    }
+    else
+    {
+        printf("not connected yet: %s\n", strerror(errno));
+        return handEPOLLRDHUP(linkPeer);
+    }
+
+    len = sizeof(peer);
+    if (getpeername(linkPeer->m_fd, (struct sockaddr *)&peer, &len) == 0)
+    {
+        printf("socket is connected to %s:%d\n", inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
+    }
+    else
+    {
+        printf("not connected yet: %s\n", strerror(errno));
+        return handEPOLLRDHUP(linkPeer);
+    }
+    bool connect = 0;
     linkPeer->setConnect(true);
     linkPeer->m_step = PEERSTEP::PEERSTEP_NORMAL;
-    linkPeer->unlock();
+    if(linkPeer->m_isV6)
+    {
+        char client_ip[INET6_ADDRSTRLEN];  
+        inet_ntop(AF_INET6, linkPeer->m_ipaddr.ipv6, client_ip, sizeof(client_ip));
+        printf("socket connect success  [%s]:%d new link\n", client_ip, htons(linkPeer->m_port) );
+    }
+    else
+    {   
+        uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
+        NOTICE("socket connect success: " << (uint32_t)pi[0] << "." << (uint32_t)pi[1] << "." << (uint32_t)pi[2] << "." << (uint32_t)pi[3] << " port: " << htons(linkPeer->m_port) << " new socket!");
+    }
 
-    uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
-    NOTICE("socket connect success: " << (uint32_t)pi[0] << "," << (uint32_t)pi[1] << "," << (uint32_t)pi[2] << "," << (uint32_t)pi[3] << " port: " << linkPeer->m_port << " new socket!");
-    uint32_t  flag   = EPOLLIN | EPOLLRDHUP;
     upTimeLink(linkPeer);
-    
-    int ref = linkPeer->regtoUp(this);
-
-
-    m_CriticalEpoll.lock();
-    m_epoll.modEnv(flag, linkPeer->m_fd, linkPeer);
-    m_CriticalEpoll.unlock();
+    linkPeer->regtoUp(this ,2);
+    setMdNew(linkPeer);
     return 1;
 }
 
@@ -529,79 +795,52 @@ int CNetworkMgr::readData(CLinkPeer *linkPeer)
     CByteStream::CBufferItem *item;
     while (true)
     {
-
         int totalLen = 0;
-        item = m_BufMgn->getBufItem();//getBufItem();
-        int readLen = recv(linkPeer->m_fd, (char *)(item->m_pBuffer), 2048, MSG_DONTWAIT);
+        int readLen = recv(linkPeer->m_fd, (char *)(linkPeer->m_readBuf), 2048, MSG_DONTWAIT);
         if (readLen < 0)
         {
             if (errno == EINTR)
             {
-                m_BufMgn->FreeBufItem(item);
+               
             }
             else if (errno == EAGAIN)
             {
-                m_BufMgn->FreeBufItem(item);
+              
                 return 0;
             }
             else
             {
-                m_BufMgn->FreeBufItem(item);
                 handEPOLLRDHUP(linkPeer);
                 return (-2);
             }
         }
         else if (readLen == 0)
         {
-            //FreeBufItem(item);
-            m_BufMgn->FreeBufItem(item);
             handEPOLLRDHUP(linkPeer);
             return (-1);
         }
         if (readLen < 2048)
         {
-            item->m_iPos    =  readLen;
-            item->m_linkMgr = this; 
-            item->m_fd      = linkPeer;
-            item->addRef();
-            linkPeer->lock();         
-            ref  = linkPeer->prepare(item);
+            linkPeer->lock();
+            ref = linkPeer->prepare(readLen);
             linkPeer->unlock();
-            uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
-            /*
-            if (ref > LINKMASKREF)
+            upTimeLink(linkPeer);
+            if(ref <= 0)
             {
-                NOTICE("socket rec: " << (uint32_t)pi[0] << "," << (uint32_t)pi[1] << "," << (uint32_t)pi[2] << "," << (uint32_t)pi[3]
-                    << " port: " << linkPeer->m_port << " len:" << readLen << "  ref: " << ref);
+                handEPOLLRDHUP(linkPeer);  
             }
-            */
-            if (0 == item->delRef())
-            {
-                m_BufMgn->FreeBufItem(item);
-            }
-            //upTimeLink(linkPeer);
             return readLen;
         }
         else if (readLen == 2048)
-        {
-          
-            item->m_iPos    =  readLen;
-            item->m_linkMgr = this; 
-            item->m_fd      = linkPeer;
-            item->addRef();
+        {          
             linkPeer->lock();
-            ref  = linkPeer->prepare(item);
-            /*if (ref > LINKMASKREF)
-            {
-                uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
-                NOTICE("socket rec: " << (uint32_t)pi[0] << "," << (uint32_t)pi[1] << "," << (uint32_t)pi[2] << "," << (uint32_t)pi[3] 
-                   << " port: " << linkPeer->m_port << " len:" << readLen << "  ref: " << ref);
-            }
-            */
+            ref = linkPeer->prepare(readLen);
             linkPeer->unlock();
-            if (0 == item->delRef())
+            upTimeLink(linkPeer);
+            if (ref <= 0)
             {
-                m_BufMgn->FreeBufItem(item);
+                handEPOLLRDHUP(linkPeer);  
+                return 0;
             }
         }
     }
@@ -610,16 +849,7 @@ int CNetworkMgr::readData(CLinkPeer *linkPeer)
 
 int  CNetworkMgr::decRefLink(CLinkPeer *linkPeer)
 {
-    int ret = linkPeer->delRef();
-    if ( ret == 0)
-    {
-        cleanLineBuf(linkPeer);
-        uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
-        NOTICE("clean socket close type: "<<linkPeer->m_linkType<<" ip:"<< (uint32_t)pi[0] << "." << (uint32_t)pi[1] << "." << (uint32_t)pi[2] << "." << (uint32_t)pi[3] << " port: " << linkPeer->m_port <<"  function: " << __FUNCTION__);
-        delete linkPeer;
-        m_links--;
-    }
-    return ret;
+    return linkPeer->delRef();
 }
 int  CNetworkMgr::sendData(void* fd, uint8_t *data, uint32_t len,  uint8_t *append, int applen)
 {
@@ -631,39 +861,21 @@ int  CNetworkMgr::sendData(void* fd, uint8_t *data, uint32_t len,  uint8_t *appe
 int CNetworkMgr::sendData(CLinkPeer *linkPeer, uint8_t *data, uint32_t len, uint8_t *append, int applen)
 {
     bool isConnect =false;
-
     CLINENTLISTITER iter;
-    m_CriticalLink.lock();
-    iter = m_client.find(linkPeer);
-    if (iter != m_client.end())
-    {
-        linkPeer->addRef();
-    }
-    else
-    {
-        m_CriticalLink.unlock();
-        return -1;
-    }
-    m_CriticalLink.unlock();
-
-    linkPeer->lock();
     isConnect = linkPeer->isConnect();
-    linkPeer->unlock();
-
     if (false ==  isConnect)
     {  
         return -1;
     }
-
+    linkPeer->addRef();
     CByteStream::CBufferItem* item = NULL;
-    uint32_t total   = len + applen + 4;
     uint8_t *curPost = append;
-    uint32_t leftlen = applen;
+    int32_t leftlen  = (int32_t)applen;
     uint8_t *head    = data;
-    uint32_t headlen = len;
+    int32_t headlen  = (int32_t)len;
     uint32_t copyLen;
     
-    while (true)
+    while ((headlen >0 ) || (leftlen > 0 ))
     {
         item = m_BufMgn->getBufItem();
         item->m_iPos = 0;
@@ -678,7 +890,6 @@ int CNetworkMgr::sendData(CLinkPeer *linkPeer, uint8_t *data, uint32_t len, uint
             headlen      -= copyLen;
             sizeleft     -= copyLen;
             post         += copyLen;
-            total        -= len;
         }
         if (leftlen > 0 && sizeleft>0)
         {
@@ -689,7 +900,6 @@ int CNetworkMgr::sendData(CLinkPeer *linkPeer, uint8_t *data, uint32_t len, uint
             leftlen      -= copyLen;
             sizeleft     -= copyLen;
             post         += copyLen;
-            total        -= len;
         }
         if ((0 == headlen) && (0 == leftlen))
         {
@@ -706,84 +916,43 @@ int CNetworkMgr::sendData(CLinkPeer *linkPeer, uint8_t *data, uint32_t len, uint
         {
             sendRet = sendData(linkPeer, item);
         }
-
         if(-1 == sendRet)
         {
-            m_BufMgn->FreeBufItem(item);
-            break;
-        }
-
-        if ((0 == headlen) && (0 == leftlen))
-        {
+            m_BufMgn->delBufRef(item);
             break;
         }
     }
     decRefLink(linkPeer);
     return 0;
 }
-int CNetworkMgr::sendData(CLinkPeer *linkPeer, CByteStream::CBufferItem *item, bool app)
-{
-    (void)app;
-    CLINENTLISTITER iter;
-    item->m_iOffset = 0;
-    
-    m_CriticalLink.lock();
-    iter = m_client.find(linkPeer);
-    if (iter != m_client.end())
-    {
-        linkPeer->addRef();
-    }
-    else
-    {
-        m_CriticalLink.unlock();
-        return -1;
-    }
-    m_CriticalLink.unlock();
-
-    int ret = -1;
-    if (IP_TCP_TYPE == linkPeer->m_linkType)
-    {
-        ret = sendData(linkPeer, item);
-    }
-    else if(IP_UDP_TYPE == linkPeer->m_linkType)
-    {
-        ret = sendUDPData(linkPeer, item);
-    }
-    decRefLink(linkPeer);
-    return ret;
-}
 
 int CNetworkMgr::sendData(CLinkPeer *linkPeer, CByteStream::CBufferItem *item)
 {
     uint8_t *post = NULL;
     bool isConnet = false;
-
-    linkPeer->lock();
-    isConnet = linkPeer->isConnect();
-    if (false == isConnet)
+    if (false == linkPeer->isConnect())
     {
-        if (linkPeer->delRef() == 0)
-        {
-           linkPeer->unlock();
-           cleanLineBuf(linkPeer);
-           delete linkPeer; 
-        }
-        else
-        {
-            linkPeer->unlock();
-        }
+        printf("linke error\n");
         return -1;
     }
-
     linkPeer->addItem(item);
-    linkPeer->unlock();
-
     uint32_t flag = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+    linkPeer->setother(true);
+    m_CriticalEpoll.lock();
+    m_epoll.modEnv(flag, linkPeer->m_fd, linkPeer);
+    m_CriticalEpoll.unlock();
+    linkPeer->setother(false);
+    return 1;
+}
+int CNetworkMgr::setOutput(CLinkPeer *linkPeer)
+{
+     uint32_t flag = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
     m_CriticalEpoll.lock();
     m_epoll.modEnv(flag, linkPeer->m_fd, linkPeer);
     m_CriticalEpoll.unlock();
     return 1;
 }
+
 
 int CNetworkMgr::sendDataInter(CLinkPeer *linkPeer)
 {
@@ -817,12 +986,7 @@ int CNetworkMgr::sendDataInter(CLinkPeer *linkPeer)
         }
         else
         {
-            //CLogger::GetInstance()->WriteLog(2, "Connect error: %s", strerror(errno));
-            //m_connet = false;
-            //close(m_socketfd);
-            //m_socketfd = -1;
-            //ret = -1;
-            handEPOLLRDHUP(linkPeer);
+            printf("send  error %d  error info  %s \n", errno, strerror(errno));
         }  
     }
     else
@@ -838,162 +1002,100 @@ int CNetworkMgr::handSendData(CLinkPeer *linkPeer)
 
     bool connect = false;
     bool send    = false;
-    linkPeer->lock();
+    int sendlen  = -1;
     connect = linkPeer->isConnect();
+    if(connect == false)
+    {
+        return -1;
+    }
+    bool getNet = true;
     item = (CByteStream::CBufferItem *)(linkPeer->m_curSend);
     if (NULL != item)
     {
         if (item->m_iOffset != item->m_iPos)
         {
-            send = true;
-            item = NULL;
-        }
-        else
-        {
-            localitem = linkPeer->getItem();
-            if (NULL == localitem)
-            {
-                linkPeer->m_curSend = NULL;
-                linkPeer->m_sending = false;
-            }
-            else
-            {
-                linkPeer->m_curSend = localitem;
-                linkPeer->m_sending = true;
-                send = true;
-            }
+            send   = true;
+            item   = NULL;
+            getNet = false;
         }
     }
-    else
+
+    if (getNet)
     {
         localitem = linkPeer->getItem();
         if (NULL == localitem)
         {
             linkPeer->m_curSend  = NULL;
-            linkPeer->m_sending  = false;
         }
         else
         {
             linkPeer->m_curSend = localitem;
-            linkPeer->m_sending = true;
             send                = true;
         }
     }
     if (send)
     {
-        sendDataInter(linkPeer);
-    }
-    linkPeer->unlock();
-
-    if (IP_TCP_TYPE == linkPeer->m_linkType)
-    {
-        upTimeLink(linkPeer);
+        sendlen = sendDataInter(linkPeer);
     }
 
     if (false == send)
     {
-        uint32_t  flag      = EPOLLIN;
-        m_CriticalEpoll.lock();
-        m_epoll.modEnv(flag, linkPeer->m_fd, linkPeer);
-        m_CriticalEpoll.unlock();
+        bool isrun = linkPeer->getOther();
+        if (false == isrun)
+        {
+            uint32_t flag = EPOLLIN | EPOLLRDHUP;
+            m_CriticalEpoll.lock();
+            m_epoll.modEnv(flag, linkPeer->m_fd, linkPeer);
+            m_CriticalEpoll.unlock();
+        }
     }
-    
+    else
+    {
+        if (-1 == sendlen)
+        {
+            handEPOLLRDHUP(linkPeer);
+        }
+    }
     if (NULL != item)
     {
-        if (0 == item->delRef())
-        {
-            m_BufMgn->FreeBufItem(item);
-        }
+        m_BufMgn->delBufRef(item);
     }
     return 0;
 }
 
-int  CNetworkMgr::cleanLineBuf(CLinkPeer *linkPeer)
-{
-    std::vector<CByteStream::CBufferItem *> list;
-    CByteStream::CBufferItem  *item = NULL;
-
-    bool hava = false;
-    int ret   = 0;
-    item = (CByteStream::CBufferItem*)linkPeer->m_curSend;
-    if (NULL != item)
-    {
-        list.push_back(item);
-        ret++;
-    }
-    while (true)
-    {
-        item = linkPeer->getItem();
-        if (item)
-        {
-            list.push_back(item);
-            ret++;
-        }
-        else
-        {
-            break;
-        }
-    }
-    if (ret > 0)
-    {
-        return 0;
-    }
-    std::vector<CByteStream::CBufferItem *>::iterator iter = list.begin();
-    std::vector<CByteStream::CBufferItem *>::iterator end  = list.end();
-   
-    for (; iter != end; iter++)
-    {
-        item = *iter;
-        uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
-        NOTICE("socket del item" << (uint32_t)pi[0] << "," << (uint32_t)pi[1] << "," << (uint32_t)pi[2] << "," << (uint32_t)pi[3] << " port: " << linkPeer->m_port << " function:" << __FUNCTION__);
-        if (0 == item->delRef())
-        {
-            m_BufMgn->FreeBufItem(item);
-        }
-    }
-    if (m_callBack)
-    {
-        if (NULL != linkPeer->m_otherParam)
-        {
-            (*m_callBack)(linkPeer->m_otherParam);
-             linkPeer->m_otherParam = NULL;
-        }
-    }
-    return ret;
-}
-
-
 int CNetworkMgr::handEPOLLRDHUP(CLinkPeer *linkPeer, int type, bool istimeOut)
 {
     int ret = 1;
-
+    linkPeer->setConnect(false);
     if (-1 != linkPeer->m_fd)
     {
         m_CriticalEpoll.lock();
         m_epoll.delEnv(linkPeer->m_fd);
         m_CriticalEpoll.unlock();
         close(linkPeer->m_fd);
+        linkPeer->m_fd = -1;
     }
 
-    //if (!istimeOut)
+    int del = delTimeLink(linkPeer);
+    if (del)
     {
-        int del = delTimeLink(linkPeer);
-        if (3 == type && del <= 0)
-        {
-            printf("Link memort Erro\n");
-        }
+        printf("delete time out %d\n", del);
     }
 
     if (PEERTYPE_CLIENT == linkPeer->m_peerTyep || PEERTYPE_UDPCLINENT == linkPeer->m_peerTyep)
     {
         ADDNETPort *newADD = new ADDNETPort;
-
-        newADD->ip   = linkPeer->m_ipaddr.ipv4;
+        memcpy(&(newADD->ip), &(linkPeer->m_ipaddr), 16);
+        newADD->isV6 = linkPeer->m_isV6;
         newADD->port = linkPeer->m_port;
+        newADD->bindport = linkPeer->m_bindport;
         newADD->type = linkPeer->m_proto;
         newADD->dist = linkPeer->m_messageRoute;
-        newADD->linkType  = linkPeer->m_linkType;
+        newADD->linkType = linkPeer->m_linkType;
         newADD->lastTime = time(NULL);
+        newADD->id       = linkPeer->m_id;
+        memcpy(newADD->mac, linkPeer->m_mac, 6);
+
         m_CriticalLink.lock();
         m_addConnect.push_back(newADD);
         m_CriticalLink.unlock();
@@ -1007,7 +1109,6 @@ int CNetworkMgr::handEPOLLRDHUP(CLinkPeer *linkPeer, int type, bool istimeOut)
         uint32_t  port  = linkPeer->m_port;
         hash_combine(seed, port);
         CUDPCLIENT::iterator iter;
-       
         m_CriticalUdp.lock();
         iter =  m_udpClinet.find(seed);
         if (iter != m_udpClinet.end())
@@ -1016,36 +1117,20 @@ int CNetworkMgr::handEPOLLRDHUP(CLinkPeer *linkPeer, int type, bool istimeOut)
         }
         m_CriticalUdp.unlock();
     }
-
-    linkPeer->lock();
-    linkPeer->setConnect(false);
-    linkPeer->unlock();
-
     bool alreadDel = true;
-    uint8_t *pi = (uint8_t *) & (linkPeer->m_ipaddr.ipv4);
-    
-
-    int linkRef = decRefLink(linkPeer);
-    if (linkRef <= 0)
+    if (linkPeer->m_isV6)
     {
-        alreadDel = false;
+        char client_ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, linkPeer->m_ipaddr.ipv6, client_ip, sizeof(client_ip));
+        NOTICE("socket close: " << client_ip << " port: " << htons(linkPeer->m_port) << "  function: " << __FUNCTION__ << " LINE:" << __LINE__);
     }
     else
     {
-        NOTICE("socket close: " << (uint32_t)pi[0] << "." << (uint32_t)pi[1] << "." << (uint32_t)pi[2] << "." << (uint32_t)pi[3] <<" type:"<< type << " function:" << __FUNCTION__ << "LINE:" << __LINE__);
+        uint8_t *pi = (uint8_t *)&(linkPeer->m_ipaddr.ipv4);
+        printf("socket close ip:%u.%u.%u.%u port:%u, CNetworkMgr::%s line:%d\n", pi[0] ,pi[1] ,pi[2],pi[3], htons(linkPeer->m_port), __FUNCTION__, __LINE__);
     }
-
-    if (type == 2)
-    {
-        if (alreadDel && (linkPeer->m_sending == true))
-        {
-            linkRef = decRefLink(linkPeer);
-            if(linkRef > 0)
-            {
-                NOTICE("socket close: " << (uint32_t)pi[0] << "." << (uint32_t)pi[1] << "." << (uint32_t)pi[2] << "." << (uint32_t)pi[3] << " type:" << type << " function:" << __FUNCTION__ << "LINE:" << __LINE__);
-            }
-        }
-    }
+    ret = decRefLink(linkPeer);
+    printf("linkPeer ref:%d CNetworkMgr::%s line:%d\n", ret, __FUNCTION__, __LINE__);
     return 0;
 }
 
@@ -1058,29 +1143,27 @@ void CNetworkMgr::upTimeLink(CLinkPeer *linkPeer)
 {
 
     CLINENTLISTITER iter;
+    std::time_t curTime = time(NULL);
     m_CriticalLink.lock();
     iter = m_client.find(linkPeer);
-    if (PEERTYPE_CLIENT == linkPeer->m_peerTyep)
+    if (iter != m_client.end())
     {
-        if (iter == m_client.end())
-        {
-            m_client.insert(linkPeer);
-        }
-    }
-    else
-    {
-        if (iter != m_client.end())
+        if (linkPeer->m_lastTime != curTime)
         {
             m_timeOut.erase(linkPeer->m_iter);
             linkPeer->m_iter = m_timeOut.insert(m_timeOut.end(), linkPeer);
         }
-        else
+    }
+    else
+    {
+        std::pair<CLINENTLISTITER, bool> insertRet = m_client.insert(linkPeer);
+        if(insertRet.second)
         {
-            linkPeer->m_iter  = m_timeOut.insert(m_timeOut.end(), linkPeer);
-            m_client.insert(linkPeer);
+            linkPeer->m_iter = m_timeOut.insert(m_timeOut.end(), linkPeer);
+            linkPeer->m_alreInser = true;
         }
     }
-    linkPeer->m_lastTime = time(NULL);
+    linkPeer->m_lastTime = curTime;
     m_CriticalLink.unlock();
 }
 
@@ -1092,7 +1175,7 @@ int CNetworkMgr::delTimeLink(CLinkPeer *linkPeer)
     if (iterLink != m_client.end())
     {
         m_client.erase(iterLink);
-        if (PEERTYPE_CLIENT != linkPeer->m_peerTyep)
+        if(linkPeer->m_alreInser)
         {
             m_timeOut.erase(linkPeer->m_iter);
         }
@@ -1104,7 +1187,6 @@ int CNetworkMgr::delTimeLink(CLinkPeer *linkPeer)
 
 int CNetworkMgr::readUdpData(CLinkPeer *linkPeer)
 {
-  
     int  ret;
     int  new_fd;
     struct sockaddr_in client_addr;
@@ -1112,8 +1194,7 @@ int CNetworkMgr::readUdpData(CLinkPeer *linkPeer)
     new_fd = linkPeer->m_fd;
     CLinkPeer *peer = NULL;
 
-    CByteStream::CBufferItem  *item = m_BufMgn->getBufItem();
-    int readLen = recvfrom(new_fd, (char *)(item->m_pBuffer), 2048, 0, (struct sockaddr *) & client_addr, &cli_len);
+    int readLen = recvfrom(new_fd, (char *)(linkPeer->m_readBuf), 2048, 0, (struct sockaddr *) & client_addr, &cli_len);
     ret = readLen;
     if (readLen > 0)
     {
@@ -1137,6 +1218,7 @@ int CNetworkMgr::readUdpData(CLinkPeer *linkPeer)
         if (NULL == peer)
         {
             peer     = new CLinkPeer();
+            peer->setBufMgn(m_BufMgn);
             peer->setMessageRoute(m_distri);
             m_links++;
             peer->m_fd          = -1;
@@ -1161,17 +1243,11 @@ int CNetworkMgr::readUdpData(CLinkPeer *linkPeer)
         {
             upTimeLink(peer);
         }
-
-        peer->addRef();
-        item->m_iPos    =  readLen;
-        item->m_linkMgr = this;
-        item->m_fd      = peer;
-        item->addRef();
+        //peer->addRef();
         //bool add = ((DistributionToThr*)m_distri)->addItem(item);
     }
     else
     {
-        m_BufMgn->FreeBufItem(item);
         printf("udp rec error  error code %d  error info  %s /n",  errno, strerror(errno));
     }
     return ret;
@@ -1187,30 +1263,22 @@ int  CNetworkMgr::readUdpClinet(CLinkPeer *linkPeer)
     new_fd = linkPeer->m_fd;
    
     CLinkPeer *peer = linkPeer;
-    CByteStream::CBufferItem  *item = m_BufMgn->getBufItem();
-    int readLen = recvfrom(new_fd, (char *)(item->m_pBuffer), 2048, 0, (struct sockaddr *) & client_addr, &cli_len);
+    int readLen = recvfrom(new_fd, (char *)(peer->m_readBuf), 2048, 0, (struct sockaddr *) & client_addr, &cli_len);
     ret = readLen;
     if (readLen > 0)
     {
         upTimeLink(linkPeer);
         peer->addRef();
         peer->setConnect(true);
-        item->m_iPos    =  readLen;
-        item->m_linkMgr = this;
-        item->m_fd      = peer;
         peer->m_step    = PEERSTEP::PEERSTEP_NORMAL;
         if (client_addr.sin_addr.s_addr == linkPeer->m_ipaddr.ipv4 && client_addr.sin_port == linkPeer->m_port)
         {
             //bool add = ((DistributionToThr*)m_distri)->addItem(item);
         }
-        else
-        {
-            m_BufMgn->FreeBufItem(item);
-        }
+      
     }
     else
     {
-        m_BufMgn->FreeBufItem(item);
         printf("udp rec error  error code %d  error info  %s /n", errno, strerror(errno));
     }
     return ret;

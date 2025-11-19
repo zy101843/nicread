@@ -163,11 +163,11 @@ struct mtu_option
 
 typedef struct ICMPhead
 {
-    uint8_t type;//类型
-    uint8_t code;//代码
-    uint16_t checkSum;//校验和
-    uint16_t ident;//进程标识符
-    uint16_t seqNum;//序号
+    uint8_t type;
+    uint8_t code;
+    uint16_t checkSum;
+    uint16_t ident;
+    uint16_t seqNum;
 } ICMPhead;
 
 struct icmp6_echo_hdr {
@@ -220,3 +220,25 @@ struct IPTYPE
     }
 };
 #pragma pack()
+struct NetInfo
+{
+    IPANDPORT4ITEM    tuple;
+    uint32_t          otherLen;
+    compact_ip_hdr   *ipv4Head;
+    uint8_t          *l3head;
+    compact_ipv6_hdr *ipv6Head;
+    uint32_t          l3HeadLen;
+    uint32_t          totalLen;
+    uint32_t          ipv4Len;
+    TCPHDR           *tcpHead;
+    UDPHDR           *udpHead;
+    uint8_t          *l4head;
+    uint16_t          l4headlLen;
+    uint8_t           nextProtocol;
+    bool              isV4Broadcast;
+    bool              isV6Multicast;
+    bool              isIPv4mcast;
+    bool              isARP;
+    bool              isGood;
+    uint32_t          hashValue; 
+};

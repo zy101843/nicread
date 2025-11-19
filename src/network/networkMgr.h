@@ -18,13 +18,18 @@ public:
 
 struct ADDNETPort
 {
-    uint32_t    ip;
+    IPADDR      ip;
     uint16_t    port;
+    uint16_t    bindport;
     int         type;
     void        *dist;
     int          linkType;
+    bool         isV6;
     std::time_t lastTime;
+    uint8_t      mac[6];
+    int          id;
 };
+
 
 class CNetworkMgr
 {
@@ -35,16 +40,18 @@ public:
     void start();
     void stop();
     void *addListen(const char *ip, uint16_t port);
+    void *addListenV6(const char *ip, uint16_t port);
     void *addUdpRec(const char *ip, uint16_t port);
     void *addConnect(ADDNETPort *item);
-    void *addConnect(const char *ip, uint16_t port, int type, void *dist);
-    void *addConnect(uint32_t ip, uint16_t port, int type, void *dist);
+    void *addConnect(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id);
+    void *addConnectV6(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id);
+    void *addConnect(uint32_t ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id);
+    void *addConnectV6(uint32_t *ip, uint16_t port, int type, uint16_t bindport, void *dist,uint8_t *mac, uint32_t id);
     void *addUDPConnect(ADDNETPort *item);
     void *addUDPConnect(const char *ip, uint16_t port, int type, void *dist);
     void *addUDPConnect(uint32_t ip, uint16_t port, int type, void *dist);
     int  sendData(CLinkPeer *linkPeer, uint8_t *data, uint32_t len, uint8_t *append=NULL, int applen=0);
     int  sendData(void *fd, uint8_t *data, uint32_t len, uint8_t *append=NULL, int applen=0);
-    int  sendData(CLinkPeer *linkPeer, CByteStream::CBufferItem* item, bool app);
     int  decRefLink(CLinkPeer *linkPeer);
     void setCallBack(void *callBack);
     void setRouteMessage(void *route);
@@ -54,6 +61,8 @@ private:
     void TimeOutThread();
     int  readData(CLinkPeer *linkPeer);
     int  sendData(CLinkPeer *linkPeer, CByteStream::CBufferItem* item);
+    int  setOutput(CLinkPeer *linkPeer);
+    int  setMdNew(CLinkPeer *linkPeer);
     int  sendUDPData(CLinkPeer *linkPeer, CByteStream::CBufferItem* item);
     int  sendDataInter(CLinkPeer *linkPeer);
     int  handSendData(CLinkPeer *linkPeer);
@@ -63,7 +72,6 @@ private:
     int  readUdpClinet(CLinkPeer *linkPeer);
 
     int  handEPOLLRDHUP(CLinkPeer *linkPeer, int type=1, bool istimeOut = false);
-    int  cleanLineBuf(CLinkPeer *linkPeer);
     int  handErr(CLinkPeer *linkPeer);
     bool SetNonBlocking(int sockfd);
     void upTimeLink(CLinkPeer *linkPeer);
@@ -96,4 +104,5 @@ private:
     CLINETIMELIST     m_timeOut;
     CNetworkCallBack *m_callBack;
     LISTVOID          m_addConnect;
+    std::time_t       m_timeBig;
 };

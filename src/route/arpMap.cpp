@@ -10,23 +10,20 @@ CArpMap::~CArpMap()
 
 }
 
-bool CArpMap::addItemV4(IPTYPE &ip, uint8_t* mac)
+bool CArpMap::addItemV4(IPTYPE &ip, uint8_t *mac)
 {
-    m_iter  = m_v4Arp.find(&ip);
+    m_iter = m_v4Arp.find(&ip);
     if (m_v4Arp.end() != m_iter)
     {
-        memcmp(m_iter->second, mac, 6);
-        return true;
-        /* if (0 == memcmp(m_iter->second, mac, 6))
-         {
-             return true;
-         }
-         else
-         {
-             delete (m_iter->first);
-             delete[](m_iter->second);
-             m_v4Arp.erase(m_iter);
-         }*/
+        if (0 == memcmp(m_iter->second, mac, 6))
+        {
+            return true;
+        }
+        else
+        {
+            memcpy(m_iter->second, mac, 6);
+            return true;
+        }
     }
     uint8_t *localMac = new uint8_t[6];
     memcpy(localMac, mac, 6);

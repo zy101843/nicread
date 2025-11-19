@@ -2,16 +2,24 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
-#include "netport/netPortHub.h"
+#include <fstream>
 #include "hub/hub.h"
 #include <cstring>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include "simple_encrypt.h"
 #include "niread/nicmgn.h"
 #include "virnic/vnicmgn.h"
 #include "network/networkMgr.h"
 #include "config.h"
+#include "nat/nat.h"
+#include "route/route.h"
+#include "dhHand.h"
 
 simple_encrypt *g_ecn;
+dhHand         *g_dh;
 int writeFile(const char *fileName, const char *content, int length)
 {
     FILE *file = fopen(fileName, "w");
@@ -23,59 +31,58 @@ int writeFile(const char *fileName, const char *content, int length)
     fclose(file);
     return count;
 }
-
-// 创建子线程
-/*
-struct threaParam{
-    std::string nicName;
-    void        *local;
-    void        *outher;
-    int          id ;
-    void        *outherParm;
-};
-
-
-void *threadFunc(void *arg)
+#define LOCK_FILE "./nic.lock"
+int checkAlreadyRun()
 {
-    return NULL;
-}
-void createThread(void *arg)
-{
-    pthread_t thread;
-    int result = pthread_create(&thread, NULL, threadFunc, arg);
-    if (result != 0)
-    {
-        printf("Failed to create thread\n");
+    int fd;
+    fd = open(LOCK_FILE, O_CREAT | O_RDWR, 0666);
+    if (fd < 0) {
+        perror("can not open lock file");
+        exit(EXIT_FAILURE);
     }
-    else
-    {
-        pthread_detach(thread);
+    if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
+        if (errno == EWOULDBLOCK) {
+            fprintf(stderr, "auth process in\n");
+            close(fd);
+            exit(EXIT_FAILURE);
+        } else {
+            perror("add lock file error");
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
     }
+    return 0;
 }
- */
-
-/*
- uint8_t key[]="liting";
- simple_encrypt *rc = new simple_encrypt(key, 6);
- uint8_t data[] = "hello world";
- uint8_t *data1 = new uint8_t[256];
- uint8_t *data2 = new uint8_t[256];
- rc->encrypt_decrypt(data, 11, data1 ,2);
- rc->decrypt_decrypt(data1, 13, data2);
- */
 
 int main(int argc, char* argv[])
 {
     int bakRun= 0;
+    checkAlreadyRun();
     if (argc >= 2)
     {
         if (0 == strcmp(argv[1], "daemon") || 0 == strcmp(argv[1], "d"))
         {
             daemon(1, 0);
             bakRun = 1;
+             bakRun = 1;
+            while (true)
+            {
+                pid_t pChild = fork();
+                if (pChild ==0)
+                {             
+                    break;
+                }
+                else 
+                {
+                    int iLoc;
+                    pChild = waitpid(pChild, &iLoc, 0);
+                    std::cout << "child process exit, restart it" << std::endl;
+                }
+            }
         }
     }
-
+    sleep(1);
+    dhHand::initAllParam();
     config *cfg = new config();
     bool readconfig = cfg->readConfig("./config.xml");
     if (readconfig == false)
@@ -87,50 +94,104 @@ int main(int argc, char* argv[])
     signal(SIGPIPE, SIG_IGN);
     g_ecn = new simple_encrypt((uint8_t *)"liting", 6);
     CHub *hub = new CHub();
- 
+    midInterface *mid = hub;
+    
+    if(cfg->m_darpMac.size() > 0)
+    {
+        printf("mac %ld", cfg->m_darpMac.size());
+        hub->setDropMac(&(cfg->m_darpMac));
+    }
+
+  
 
     VNicMgn *virNic = NULL;
     NicMgn *nicMgn = NULL;
-    if (cfg->m_vir)
+
+    if (!cfg->m_nicname.empty())
     {
-        VNicMgn *virNic = new VNicMgn();
-        virNic->setHub(hub);
-        virNic->setName(cfg->m_nicname, cfg->m_virip, cfg->m_virmask);
-        virNic->start();
+        if (cfg->m_vir)
+        {
+            VNicMgn *virNic = new VNicMgn();
+            virNic->setHub(mid);
+            virNic->setName(cfg->m_nicname, cfg->m_virip, cfg->m_virmask, cfg->m_virMac);
+            virNic->start();
+        }
+        else
+        {
+            std::string nicName1 = cfg->m_nicname;
+            NicMgn *nicMgn = new NicMgn();
+            nicMgn->setName(nicName1, cfg->m_virMac);
+            if (cfg->m_filter)
+            {
+                uint32_t myip   = htonl(inet_addr(cfg->m_virip.c_str()));
+                uint32_t mymask = htonl(inet_addr(cfg->m_virmask.c_str()));
+                hub->setVnicNat(myip & mymask, mymask);
+            }
+            nicMgn->setHub(mid);
+            nicMgn->start();
+        }
     }
-    else
+    
+    if (cfg->m_openRoute)
     {
-        std::string nicName1 = cfg->m_nicname;
-        NicMgn *nicMgn = new NicMgn();
-        nicMgn->setName(nicName1);
-        nicMgn->setHub(hub);
-        nicMgn->start();
+        Route *route = new Route();
+        route->readCof();
+        route->setHub(mid);
+        route->start();
+    }
+
+    if(cfg->m_opennat)
+    {
+        Nat *nat = new Nat();
+        nat->setHub(mid);
+        nat->start();
     }
 
     CNetworkMgr *netwokr = new CNetworkMgr();
-    netwokr->setRouteMessage(hub);
+    netwokr->setRouteMessage(mid);
     if (cfg->m_sevice)
     {
-        netwokr->addListen(cfg->m_serviceip.c_str(), cfg->m_sport);
-    }
-    netwokr->start();
-
-    if (cfg->m_clinet)
-    {
-        std::set<client*>::iterator iter = cfg->m_clients.begin(); 
-        std::set<client*>::iterator end  = cfg->m_clients.end();
+        std::set<ipPort*>::iterator iter = cfg->m_serviceips.begin(); 
+        std::set<ipPort*>::iterator end  = cfg->m_serviceips.end();
         for(;iter != end ; iter++)
         { 
-            client *cli = *iter;
-            //netwokr->addConnect(cfg->m_clientip.c_str(), cfg->m_cport, 2, hub);
-            netwokr->addConnect(cli->m_clientip.c_str(), cli->m_cport, 2, hub);
+            ipPort *cli = *iter;
+            if(std::string::npos == cli->ip.find(':'))
+            {
+                netwokr->addListen(cli->ip.c_str(), cli->port);
+            }
+            else
+            {
+                netwokr->addListenV6(cli->ip.c_str(), cli->port);
+            }
         }
     }
-
+    netwokr->start();
+    if (cfg->m_clinet)
+    {
+        std::set<ipPort *>::iterator iter = cfg->m_clients.begin();
+        std::set<ipPort *>::iterator end = cfg->m_clients.end();
+        for (; iter != end; iter++)
+        {
+            ipPort *cli = *iter;
+            for (int i = 0; i < cli->count ; i++)
+            {
+                if (std::string::npos == cli->ip.find(':'))
+                {
+                    netwokr->addConnect(cli->ip.c_str(), cli->port, 2, cli->bindport, hub, cli->mac, cli->id);
+                }
+                else
+                {
+                    netwokr->addConnectV6(cli->ip.c_str(), cli->port, 2, cli->bindport, hub, cli->mac, cli->id);
+                }
+            }
+        }
+    }
+    hub->workThread();
     while (1)
     {
         sleep(10);
     }
-    delete cfg;
+    delete cfg; 
     return 0;
 }

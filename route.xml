@@ -1,0 +1,7 @@
+<config>
+  <local    ip="192.168.0.5"    mask="255.255.255.0" mac="18:9b:a5:81:f2:b6" />
+  <filename name="ipv4_g.txt"   gateway="18:9b:a5:81:f2:b7"  ip="192.168.0.252" />
+  <filename name="ipv4_SG.txt"  gateway="18:9b:a5:81:f2:b7"  ip="192.168.0.252"/>
+  <filename name="ipv4.txt"     gateway="18:9b:a5:81:f2:b7"  ip="192.168.0.252" />
+  <default  gateway="00:1b:21:a5:59:4f" ip="192.168.0.1" />
+</config>

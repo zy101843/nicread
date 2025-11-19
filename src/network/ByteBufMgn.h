@@ -14,6 +14,7 @@ public:
 public:
     CByteStream::CBufferItem *getBufItem();
     void FreeBufItem(CByteStream::CBufferItem *item);
+    int  delBufRef(CByteStream::CBufferItem *item);
 
 private:
     CByteStream m_ByteStram;

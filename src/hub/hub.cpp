@@ -2,7 +2,7 @@
 #include "../interface.h"
 #include "../util/utility_net.h"
 #include "../NetModeBase.h"
-//#include "../network/netMessageRoute.h"
+#include <functional>
 
 Filter::Filter()
 {
@@ -47,10 +47,40 @@ void FilterMac::addMac(std::unordered_set<uint64_t> &set)
 CHub::CHub()
 {
     m_filter = NULL;
+    m_vip = 0;
+    m_vmask = 0;
+    m_dropLen = 0;
+    m_dropVec = NULL;
+
+    m_haveVirNic = false;
+    m_aut        = NULL;
+    m_PackCount  = 0;
+    sem_init(&m_sem, 0, 1);
+    pthread_mutex_init(&m_mutex, NULL);
+    pthread_mutex_init(&m_mutexBuf, NULL);
+
+    initData();
 }
 
 CHub::~CHub()
 {
+}
+
+void CHub::start()
+{
+    m_monitorTread = new std::thread(std::bind(&CHub::workThread, this));
+}
+
+void CHub::setVnicNat(uint32_t ip, uint32_t mask)
+{
+    m_vip   = ip;
+    m_vmask = mask;
+}
+
+void CHub::setDropMac(std::vector<uint8_t *> *drop)
+{
+    m_dropVec = drop;
+    m_dropLen = drop->size();
 }
 
 void arpV4(uint8_t *data, int len, void *param)
@@ -73,8 +103,7 @@ void arpV4(uint8_t *data, int len, void *param)
         inet_ntop(AF_INET, &(psArp->dstip), buf2, 128);
         if (NULL == param)
         {
-            //printf("req ip %s  %s  ", buf, buf2);
-            //printf("mac: %02x:%02x:%02x:%02x:%02x:%02x \n", data[6], data[7], data[8], data[9], data[10], data[11]);
+            
         }
         break;
     }
@@ -94,18 +123,38 @@ void arpV4(uint8_t *data, int len, void *param)
     }
     default:
     {
-        //printf("error \n");
         break;
     }
     }
     return;
 }
-void CHub::AdjustIPHeadV4(NetInfo *netInfo, uint8_t *data)
+
+uint32_t arpV4(uint8_t *data, int len, int &type)
 {
-    uint8_t *sendData = data;
-    compact_ip_hdr *ip = (compact_ip_hdr *)(sendData + 14 + netInfo->otherLen);
-    ip->check = 0;
-    ip->check = (uint16_t)(~(uint32_t)lwip_standard_chksum(ip, ip->ihl * 4));
+    compact_eth_hdr *pEth = (compact_eth_hdr *)(data);
+    uint32_t headLen = 14 + 0;
+    arp_hdr *psArp = (arp_hdr *)(data + headLen);
+
+    uint32_t local = 0;
+    type = psArp->optype;
+    switch (ntohs(psArp->optype))
+    {
+    case 1:
+    {
+        local = ntohl(psArp->dstip);
+        break;
+    }
+    case 2:
+    {
+        local = ntohl(psArp->dstip);
+        break;
+    }
+    default:
+    {
+        break;
+    }
+    }
+    return local;
 }
 
 void CHub::AdjustUPDCheckSumV4(NetInfo *netInfo, uint8_t *data, int len)
@@ -134,7 +183,7 @@ void CHub::AdjustTcpCheckSumV4(NetInfo *netInfo, uint8_t *data, int len)
     tcpHead->CheckSum = 00;
     uint8_t *TCPHeader = (uint8_t *)sendData + headLen;
 
-    uint32_t totalLen = htons(ip->tot_len); //netInfo->totalLen;
+    uint32_t totalLen = htons(ip->tot_len); // netInfo->totalLen;
     uint32_t l4Len = 0;
     l4Len = totalLen - netInfo->l3HeadLen;
     uint16_t chk1 = inet_chksum_pseudo(TCPHeader, IP_TCP_TYPE, l4Len, &(ip->saddr), &(ip->daddr));
@@ -167,238 +216,261 @@ void CHub::AdjustTcpCheckSumV6(NetInfo *netInfo, uint8_t *data, int len)
     tcpHead->CheckSum = chk1;
 }
 
-static uint8_t BroadcastMac[] ={ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-static uint8_t V6Multicast[] ={ 0x33, 0x33 };
-
-int CHub::analysisIPHead(uint8_t *data, int len, NetInfo *netInfo)
-{
-    netInfo->isARP = false;
-    netInfo->isV4Broadcast = (memcmp(BroadcastMac, data, 6) == 0 ? true : false);
-    netInfo->isV6Multicast = (memcmp(V6Multicast, data, 2) == 0 ? true : false);
-    uint32_t l3_offset = sizeof(compact_eth_hdr);
-    uint16_t eth_type;
-    uint8_t *buffer = data;
-    uint32_t buffer_len = len;
-
-    eth_type = (buffer[12] << 8) + buffer[13];
-    uint32_t otherHeadLen = 0;
-    while (eth_type == 0x8100)
-    {
-        l3_offset += 4;
-        otherHeadLen += 4;
-        eth_type = (buffer[l3_offset - 2] << 8) + buffer[l3_offset - 1];
-    }
-    if (eth_type == 0x8864)
-    {
-        l3_offset += 8;
-        otherHeadLen += 8;
-        if (0x21 == buffer[l3_offset - 1])
-        {
-            eth_type = 0x0800;
-        }
-    }
-    netInfo->otherLen = otherHeadLen;
-    
-    //memset(netInfo->tuple.srcIP.v6, 0, 16);
-    //memset(netInfo->tuple.dstIP.v6, 0, 16);
-
-    netInfo->tuple.restIp();
-    switch (eth_type)
-    {
-    case 0x0800:
-    {
-        if (buffer_len < (l3_offset + sizeof(struct compact_ip_hdr)))
-        {
-            printf("ipv4  error %d\n", buffer_len);
-            return 0;
-        }
-        netInfo->ipv4Head = (struct compact_ip_hdr *)&buffer[l3_offset];
-        netInfo->tuple.srcIP.v4 = ntohl(netInfo->ipv4Head->saddr);
-        netInfo->tuple.dstIP.v4 = ntohl(netInfo->ipv4Head->daddr);
-        netInfo->tuple.isIPV6 = false;
-        netInfo->nextProtocol = netInfo->ipv4Head->protocol;
-        netInfo->tuple.protcol = netInfo->nextProtocol;
-        netInfo->l3HeadLen = netInfo->ipv4Head->ihl * 4;
-        netInfo->totalLen = htons(netInfo->ipv4Head->tot_len);
-        netInfo->ipv4Len = len - netInfo->l3HeadLen;
-        break;
-    }
-    case 0x86DD:
-    {
-        if (buffer_len < (l3_offset + sizeof(struct compact_ipv6_hdr)))
-        {
-            // printf("ipv6  error %d\n", buffer_len);
-            return 0;
-        }
-        netInfo->ipv6Head = (struct compact_ipv6_hdr *)&buffer[l3_offset];
-        memcpy(netInfo->tuple.srcIP.v6, &(netInfo->ipv6Head->saddr), 16);
-        memcpy(netInfo->tuple.dstIP.v6, &(netInfo->ipv6Head->daddr), 16);
-        netInfo->nextProtocol = netInfo->ipv6Head->nexthdr;
-        netInfo->tuple.protcol = netInfo->nextProtocol;
-        netInfo->totalLen = htons(netInfo->ipv6Head->payload_len);
-        netInfo->ipv4Len = netInfo->totalLen;
-        netInfo->tuple.isIPV6 = true;
-        netInfo->l3HeadLen = 40;
-        break;
-    }
-    case 0x0806:
-    {
-        netInfo->l3HeadLen = 0;
-        netInfo->isARP = true;
-        netInfo->totalLen = 20;
-        break;
-    }
-    default:
-    {
-        netInfo->totalLen = 20;
-        netInfo->nextProtocol =  0;
-        netInfo->l3HeadLen = 0;
-        return 0;
-    }
-    }
-    if (netInfo->l3HeadLen > 40)
-    {
-        //printf("error \n");
-    }
-    return 1;
-}
-
-int CHub::analysisL4Head(NetInfo *netInfo, uint8_t *data, int len)
-{
-    uint32_t headLen = 14 + netInfo->otherLen + netInfo->l3HeadLen;
-    uint32_t local;
-    uint32_t truelen;
-    uint8_t *recData = data;
-    
-    switch (netInfo->nextProtocol)
-    {
-    case IP_UDP_TYPE:
-    {
-        netInfo->udpHead = (UDPHDR *)(recData + headLen);
-        netInfo->tuple.srcPort = netInfo->udpHead->SrcPort;
-        netInfo->tuple.dstPort = netInfo->udpHead->DesPort;
-        netInfo->l4headlLen = 8;
-        // truelen  =   netInfo->totalLen - 8;
-        ////local    =  len - headLen - 8;
-        // if (truelen > local)
-        //{
-        //     return 0;
-        // }
-        break;
-    }
-    case IP_TCP_TYPE:
-    {
-        netInfo->tcpHead = (TCPHDR *)(recData + headLen);
-        netInfo->tuple.srcPort = netInfo->tcpHead->SrcPort;
-        netInfo->tuple.dstPort = netInfo->tcpHead->DesPort;
-        netInfo->l4headlLen = (netInfo->tcpHead->hdLen * 4);
-        /* truelen  =  netInfo->totalLen - netInfo->tcpHead->hdLen * 4;
-         if (truelen > local)
-         {
-             return 0;
-         }*/
-        break;
-    }
-    default:
-    {
-
-        break;
-    }
-    }
-    return 1;
-}
-
-const uint8_t MCASET_MAC[4] ={ 0x01, 0x00, 0x5e, 0x00};
 int CHub::addData(uint8_t *data, int len, void *param)
 {
+    if (len > 0 && len < 30)
+    {
+        return 0;
+    }
+    if (len > 1580)
+    {
+        return 0;
+    }
 
     if (len < 0)
     {
+        if (len != -1 && len != -2)
+        {
+            return 0;
+        }
+    }
+
+    HubMidBuf *lo = NULL;
+    pthread_mutex_lock(&m_mutexBuf);
+    if (m_freeList.size() > 0)
+    {
+        lo = m_freeList.top();
+        m_freeList.pop();
+    }
+    else
+    {
+        lo = new HubMidBuf;
+        lo->type = 2;
+    }
+    pthread_mutex_unlock(&m_mutexBuf);
+    if (lo)
+    {
+
+        lo->len = len;
+        if (len > 0)
+        {
+            memcpy(lo->buf, data, len);
+        }
+        lo->param = param;
+        pthread_mutex_lock(&m_mutex);
+        m_listBuf.push(lo);
+        pthread_mutex_unlock(&m_mutex);
+    }
+    sem_post(&m_sem);
+    return len;
+}
+void CHub::workThread()
+{
+    HubMidBuf *lo = NULL;
+    bool condition = false;
+    while (true)
+    {
+        sem_wait(&m_sem);
+        do
+        {
+            condition = false;
+            lo = NULL;
+            pthread_mutex_lock(&m_mutex);
+            if (m_listBuf.size() > 0)
+            {
+                lo = m_listBuf.front();
+                m_listBuf.pop();
+                condition = !m_listBuf.empty();
+            }
+            pthread_mutex_unlock(&m_mutex);
+            if (lo)
+            {
+                addData1(lo->buf, lo->len, lo->param);
+                if (1 == lo->type)
+                {
+                    pthread_mutex_lock(&m_mutexBuf);
+                    m_freeList.push(lo);
+                    pthread_mutex_unlock(&m_mutexBuf);
+                }
+                else
+                {
+                    delete lo;
+                }
+            }
+        } while (condition);
+    }
+}
+
+const uint8_t MCASET_MAC[4] = {0x01, 0x00, 0x5e, 0x00};
+int CHub::addData1(uint8_t *data, int len, void *param)
+{
+
+    LinkParam *srcparam = (LinkParam *)param;
+    uint32_t local = *(uint32_t *)data;
+    if (len == -1)
+    {
         justAddPort(param);
+        if (1 == srcparam->linkType)
+        {
+            if (1 == srcparam->linkSubType)
+            {
+                if (NULL != srcparam->m_ext)
+                {
+                    uint8_t *locamac = (uint8_t *)(srcparam->m_ext);
+                    updateMac(locamac, param);
+                    printf("Add mac in nic: %02X:%02X:%02X:%02X:%02X:%02X\n", locamac[0], locamac[1], locamac[2], locamac[3], locamac[4], locamac[5]);
+                }
+            }
+            if (2 == srcparam->linkSubType)
+            {
+                m_haveVirNic = true;
+                m_aut = (uint8_t *)(srcparam->m_ext);
+                if (NULL != m_aut)
+                {
+                    updateMac(m_aut + 6, param);
+                }
+            }
+            else if (3 == srcparam->linkSubType)
+            {
+                if (NULL != srcparam->m_ext)
+                {
+                    uint8_t *locamac = (uint8_t *)(srcparam->m_ext);
+                    updateMac(locamac, param);
+                    printf("add route mac: %02X:%02X:%02X:%02X:%02X:%02X\n", locamac[0], locamac[1], locamac[2], locamac[3], locamac[4], locamac[5]);
+                }
+            }
+        }
+        else if (2 == srcparam->linkType)
+        {
+            if (m_haveVirNic)
+            {
+                if (NULL != m_aut)
+                {
+                    data = m_aut;
+                    len = 60;
+                    srcparam->addRef();
+                    sendData(param, NULL, data, len, param);
+                }
+            }
+            if (NULL != srcparam->m_ext)
+            {
+                updateMac((uint8_t *)(srcparam->m_ext), param);
+            }
+        }
+        m_PackCount = 0;
         return 0;
     }
-    if (len < 30)
+    else if (len == -2)
+    {
+        cleanLink(param);
+        return 0;
+    }
+    if (len < 0)
     {
         return 0;
     }
 
-    LinkParam *srcparam = (LinkParam *)param;
-    uint32_t local = *(uint32_t*)data;
-    if (srcparam->linkType == 1)
+    local &= 0x00ffffff;
+    if (local == 0x5e0001)
     {
-        local &= 0x00ffffff;
-        if (local == 0x5e0001)
-        {
-            return 0;
-        }
+        return 0;
+    }
+    if (local == 0xc28001)
+    {
+        return 0;
     }
 
     int ret = 0;
     LinkParam *localParam = (LinkParam *)param;
-    Interface *portint = localParam->interFace;
-    NetInfo    netInfo;
-    void      *locapPort;
+    NetInfo netInfo;
+    void *locapPort;
+
     netInfo.nextProtocol = 0;
-    netInfo.l3HeadLen    = 0;
-    ret  = analysisIPHead(data, len, &netInfo);
+    netInfo.l3HeadLen = 0;
+    netInfo.totalLen = 0;
+    ret = analysisIPHead(data, len, &netInfo);
     if (0 == ret)
     {
         return 0;
     }
-    int buflen =  netInfo.totalLen + 14 + netInfo.otherLen;
+    int buflen = netInfo.totalLen + 14 + netInfo.otherLen;
     if (len < buflen)
     {
         return 0;
     }
     analysisL4Head(&netInfo, data, len);
-    if (NULL != m_filter)
+    bool sendtoAll = false;
+    if (netInfo.isARP)
     {
-        if (m_filter->process(&netInfo, data, len))
+        updateMac(data + 6, param);
+        if(m_vip != 0 || (srcparam->linkType == 1) )
         {
-            return 0;
+            int optype = 0;
+            uint32_t dip = arpV4(data, len, optype);
+            dip &= m_vmask;
+            if (dip != m_vip)
+            {
+                return 0;
+            }
+        }
+    }
+    if (ICMPV6 == netInfo.nextProtocol && netInfo.isV6Multicast)
+    {
+        updateMac(data + 6, param);
+        sendtoAll = true;
+    }
+    if (netInfo.isV4Broadcast)
+    {
+        if (netInfo.isARP)
+        {
+            sendtoAll = true;
+        }
+        else if ((netInfo.tuple.srcPort == 0x4400) && (netInfo.tuple.dstPort == 0x4300)) // ipv4 dhcp
+        {
+            sendtoAll = true;
         }
     }
 
-    bool sendtoAll = false;
-    if (ICMPV6 == netInfo.nextProtocol && netInfo.isV6Multicast)
+    if(m_PackCount < 1000)
     {
-        sendtoAll = true;
-    }
-    if (netInfo.isV4Broadcast && netInfo.isARP)
-    {
-        sendtoAll = true;
+        updateMac(data + 6, param);
+        m_PackCount++;
     }
     
-    //f (netInfo.isARP)
-    //{
-        //if(NULL==param)
-        //arpV4(data, len, param);
-    //}
-
-    updateMac(data + 6, param);
     if (sendtoAll)
     {
-        //if (srcparam->linkType == 2)
-        //{
         sendToAllPort(data, len, param);
-        //}
     }
     else
     {
-      
-        locapPort = findPort(data);
-        if (nullptr != locapPort && locapPort != portint)
+        locapPort = findPort(data, netInfo.hashValue);
+        if (nullptr != locapPort)
         {
-            tcpFragmentation(locapPort, &netInfo, data, len, param);
-            //sendData(locapPort, &netInfo, data, len, param);
+            if (netInfo.isARP && (((LinkParam *)locapPort)->linkType == 2))
+            {
+                if (1 == sendArp(data, len, param, &netInfo))
+                {
+                    tcpFragmentation(locapPort, &netInfo, data, len, param);
+                }
+                else
+                {
+                    ((LinkParam *)locapPort)->delRef();
+                }
+            }
+            else
+            {
+                tcpFragmentation(locapPort, &netInfo, data, len, param);
+            }
         }
     }
     return len;
 }
 
-static uint8_t SYNOPT[] = {0x02, 0x04, 0x05, 0x1d, 0x01, 0x03, 0x03, 0x08, 0x01, 0x01, 0x04, 0x02};
+static uint8_t SYNOPT[] = {0x02, 0x04, 0x05, 0x68, 0x01, 0x03, 0x03, 0x08, 0x01, 0x01, 0x04, 0x02};
 static uint8_t ACKOPT[] = {0x02, 0x04, 0x05, 0xb4, 0x01, 0x01, 0x04, 0x02, 0x01, 0x03, 0x03, 0x07};
 
+const uint16_t g_max_tcp_len = 1384;
+const uint8_t *g_max_post = (uint8_t *)&g_max_tcp_len;
 int CHub::findMSS(NetInfo *netInfo, uint8_t *data)
 {
     uint8_t *opt = (uint8_t *)(netInfo->tcpHead) + 20;
@@ -422,10 +494,10 @@ int CHub::findMSS(NetInfo *netInfo, uint8_t *data)
             typelen = opt[1];
             intemLen = *((uint16_t *)(opt + 2));
             intemLen = htons(intemLen);
-            if (intemLen != 1309)
+            if (intemLen > g_max_tcp_len)
             {
-                *(opt + 2) = 0x05;
-                *(opt + 3) = 0x1d;
+                *(opt + 2) = *(g_max_post + 1);
+                *(opt + 3) = *g_max_post;
                 notnedd = true;
             }
             find = false;
@@ -440,28 +512,15 @@ int CHub::findMSS(NetInfo *netInfo, uint8_t *data)
         }
     }
     int totallen = 14 + netInfo->otherLen + netInfo->l3HeadLen + netInfo->l4headlLen;
-    if (find)
+    if (notnedd)
     {
-        netInfo->tcpHead->hdLen++;
-        uint8_t *add = (uint8_t *)(netInfo->tcpHead) + netInfo->l4headlLen;
-        memcpy(add, SYNOPT, 4);
-        netInfo->ipv4Head->tot_len = htons(netInfo->totalLen + 4);
-        AdjustIPHeadV4(netInfo, data);
-
-        totallen += 4;
-        AdjustTcpCheckSumV4(netInfo, data, totallen);
-    }
-    else
-    {
-        if (notnedd)
-        {
-            AdjustTcpCheckSumV4(netInfo, data, totallen);
-        }
+        TCPHDR *tcpHead = (TCPHDR *)(netInfo->tcpHead);
+        uint16_t oldchecksumb = tcpHead->CheckSum;
+        uint16_t neteck = csum_update16(oldchecksumb, htons(intemLen), htons(g_max_tcp_len));
+        tcpHead->CheckSum = neteck;
     }
     return totallen;
 }
-
-#define BODYMAX_LEN 1309
 
 int CHub::tcpFragmentation(void *dstParam, NetInfo *netInfo, uint8_t *data, int len, void *param)
 {
@@ -469,9 +528,8 @@ int CHub::tcpFragmentation(void *dstParam, NetInfo *netInfo, uint8_t *data, int 
     LinkParam *src = (LinkParam *)param;
     Interface *inter = loacalParam->interFace;
     bool find = true;
-
-
-    if (src->linkType == 2)
+    
+    if (1 == loacalParam->linkType)
     {
         inter->writeData(data, len, 2, param, dstParam);
     }
@@ -479,23 +537,24 @@ int CHub::tcpFragmentation(void *dstParam, NetInfo *netInfo, uint8_t *data, int 
     {
         switch (netInfo->nextProtocol)
         {
-            case IP_UDP_TYPE:
+        case IP_UDP_TYPE:
+        {
+            if (len <= 1514)
             {
-                if (len < 1514)
-                {
-                    inter->writeData(data, len, 2, param, dstParam);
-                }
-                else
-                {
-                    printf("the udp sen is error %d %s %d\n", len, __FUNCTION__, __LINE__);
-                }
-                break;
+                inter->writeData(data, len, 2, param, dstParam);
             }
-            case IP_TCP_TYPE:
+            else
+            {
+                printf("the udp sen is error %d %s %d\n", len, __FUNCTION__, __LINE__);
+            }
+            break;
+        }
+        case IP_TCP_TYPE:
+        {
+            if (false == netInfo->tuple.isIPV6)
             {
                 uint8_t flag = netInfo->tcpHead->FLAG;
-                uint8_t ack  = netInfo->tcpHead->FLAG;
-
+                uint8_t ack = netInfo->tcpHead->FLAG;
                 if (0x02 == flag)
                 {
                     int adjlen = findMSS(netInfo, data);
@@ -509,92 +568,29 @@ int CHub::tcpFragmentation(void *dstParam, NetInfo *netInfo, uint8_t *data, int 
                 }
                 else
                 {
-                    /*
-                    uint32_t headLen = 14 + netInfo->otherLen + netInfo->l3HeadLen + netInfo->l4headlLen;
-                    int bodylen = len - headLen;
-                    if (bodylen > BODYMAX_LEN)
-                    {
-                        uint32_t seq = 0;
-                        uint16_t id = 0;
-                        uint16_t l3total = 0;
-                        uint32_t l3l4Head = netInfo->l3HeadLen + netInfo->l4headlLen;
-
-                        int leftlen = bodylen;
-
-                        seq = htonl(netInfo->tcpHead->ulSeq);
-                        id  = htons(netInfo->ipv4Head->id);
-
-                        int count = 0;
-                        uint8_t *bodybuf = data + headLen;
-                        uint8_t *frisbuf = bodybuf;
-                        int sendLen;
-                        int copylen;
-                        do
-                        {
-
-                            l3total = l3l4Head;
-                            copylen = leftlen > BODYMAX_LEN ? BODYMAX_LEN : leftlen;
-                            if (bodybuf != frisbuf)
-                            {
-                                memcpy(frisbuf, bodybuf, copylen);
-                            }
-                            l3total += copylen;
-                            netInfo->ipv4Head->id = htons(id);
-                            netInfo->ipv4Head->tot_len = htons(l3total);
-                            netInfo->tcpHead->ulSeq = htonl(seq);
-                            //inter->writeData(data, len, 2, param);
-                            seq += copylen;
-                            id++;
-                            leftlen -= copylen;
-                            bodybuf += copylen;
-
-                            sendLen = l3total + 14 + netInfo->otherLen;
-                            AdjustIPHeadV4(netInfo, data);
-                            AdjustTcpCheckSumV4(netInfo, data, sendLen);
-
-                            inter->writeData(data, sendLen, 2, param, loacalParam);
-
-                            find = false;
-                            if (leftlen > 0)
-                            {
-                                m_critical.lock();
-                                if (m_portSet.end() != m_portSet.find(loacalParam))
-                                {
-                                    find = true;
-                                    loacalParam->addRef();
-                                }
-                                m_critical.unlock();
-                            }
-
-                            if (false == find)
-                            {
-                                break;
-                            }
-                        } while (leftlen);
-                    }
-                    else
-                    {
-                        inter->writeData(data, len, 2, param, dstParam);
-                    }   */
                     inter->writeData(data, len, 2, param, dstParam);
                 }
-                break;
             }
-            default:
+            else
             {
-                if (len < 1514)
-                {
-                    inter->writeData(data, len, 2, param, dstParam);
-                }
-                else
-                {
-                    printf("unknow  sen is error %d %s %d\n", len, __FUNCTION__, __LINE__);
-                }
-                break;
+                inter->writeData(data, len, 2, param, dstParam);
             }
+            break;
+        }
+        default:
+        {
+            if (len <= 1514)
+            {
+                inter->writeData(data, len, 2, param, dstParam);
+            }
+            else
+            {
+                printf("unknow sen is error %d %s %d\n", len, __FUNCTION__, __LINE__);
+            }
+            break;
+        }
         }
     }
-
     loacalParam->delRef();
     return len;
 }
@@ -605,7 +601,7 @@ int CHub::sendData(void *dstParam, NetInfo *netInfo, uint8_t *data, int len, voi
     Interface *inter = loacalParam->interFace;
     bool find = true;
     int ret = -1;
-    if (len < 1514)
+    if (len <= 1514)
     {
         ret = inter->writeData(data, len, 2, param, dstParam);
     }
@@ -617,15 +613,25 @@ int CHub::sendData(void *dstParam, NetInfo *netInfo, uint8_t *data, int len, voi
     return len;
 }
 
-int CHub::updateMac(uint8_t *data,void *param)
+int CHub::updateMac(uint8_t *data, void *param)
 {
+    if ((0xffffffff == *(uint32_t *)(data)) && (0xffff == (*(uint16_t *)(data + 4))))
+    {
+        return 0;
+    }
+    if ((0x0 == *(uint32_t *)(data)) && (0x0 == (*(uint16_t *)(data + 4))))
+    {
+        return 0;
+    }
+    if (0x01 == ((*data) & 0xFE))
+    {
+        printf("error mac %x\n", *data);
+    }
     mac_inter loc(data);
-    m_critical.lock();
-
     MACMAPITER iter = m_macMap.find(&loc);
     if (m_macMap.end() == iter)
     {
-        mac_inter *newmac =  new mac_inter(data);
+        mac_inter *newmac = new mac_inter(data);
         newmac->p = param;
         m_macMap.insert(newmac);
     }
@@ -636,53 +642,9 @@ int CHub::updateMac(uint8_t *data,void *param)
             (*iter)->p = param;
         }
     }
-    m_critical.unlock();
-
     return 0;
 }
-
-int CHub::cleanLink(void *param)
-{
-    LinkParam *localparam = (LinkParam *)param;
-  
-    MACMAPITER iterFind;
-    PORTSET::iterator postSet;
-    int count = 0;
-    bool findItem = false;
-    m_critical.lock();
-
-    postSet = m_portSet.find(param);
-    if (m_portSet.end() != postSet)
-    {
-        m_portSet.erase(postSet);
-        findItem = true;
-    }
-     /*
-    std::unordered_set<uint64_t>::iterator iter = localparam->macList.begin();
-    std::unordered_set<uint64_t>::iterator end  = localparam->macList.end();
-    for (; iter != end; iter++)
-    {
-        iterFind = m_macMap.find(*iter);
-        if (m_macMap.end() != iterFind)
-        {
-            LinkParam *localParam2 = ((LinkParam *)(iterFind->second));
-            if (localparam == localParam2)
-            {
-                count++;
-                m_macMap.erase(iterFind);
-            }
-        }
-    }
-    */
-    m_critical.unlock();
-
-    if (findItem)
-    {
-        ((LinkParam *)(param))->delRef();
-    }
-    return count;
-}
-
+/*
 void *CHub::findPort(uint8_t *data)
 {
     mac_inter loc(data);
@@ -690,89 +652,159 @@ void *CHub::findPort(uint8_t *data)
     MACMAPITER iter;
     void *ret = NULL;
 
-    m_critical.lock();
     iter = m_macMap.find(&loc);
     if (m_macMap.end() != iter)
     {
         linkParam = ((LinkParam *)((*iter)->p));
-        if (m_portSet.end() != m_portSet.find(linkParam))
-        {
-            linkParam->addRef();
-            ret = linkParam;
-        }
+        linkParam->addRef();
+        ret = linkParam;
     }
-    m_critical.unlock();
+    return ret;
+}
+*/
+void *CHub::findPort(uint8_t *data, std::size_t hashCode)
+{
+    mac_inter loc(data);
+    LinkParam *linkParam = NULL;
+    LinkParam *linkParam1 = NULL;
+    MACMAPITER iter;
+    void *ret = NULL;
 
+    iter = m_macMap.find(&loc);
+    if (m_macMap.end() != iter)
+    {
+        linkParam1 = ((LinkParam *)((*iter)->p));
+        linkParam   = (LinkParam *) getOneLikelyPort(linkParam1, hashCode);
+        linkParam->addRef();
+        ret = linkParam;
+    }
     return ret;
 }
 
 void CHub::justAddPort(void *port)
 {
-    m_critical.lock();
     PORTSET::iterator iter = m_portSet.find(port);
     if (m_portSet.end() == iter)
     {
-        ((LinkParam *)(port))->addRef();
         m_portSet.insert(port);
+        LinkParam *localparam = (LinkParam *)port;
+        printf("add id port HUB::%s %d\n", __FUNCTION__, __LINE__);
+        addIDPort(port);
     }
     else
     {
-	printf("double add %ld\n",m_portSet.size());
+        printf("alread hava link param HUB::%s %d\n", __FUNCTION__, __LINE__);
     }
-    m_critical.unlock();
+
 }
+
+int CHub::cleanLink(void *param)
+{
+    LinkParam *localparam = (LinkParam *)param;
+
+    MACMAPITER iterFind;
+    PORTSET::iterator postSet;
+    int count = 0;
+    int count2 = 0;
+    bool findItem = false;
+
+    postSet = m_portSet.find(param);
+    if (m_portSet.end() != postSet)
+    {
+        m_portSet.erase(postSet);
+        rmIDPort(param);
+        findItem = true;
+    }
+
+    if (findItem)
+    {
+        MACMAPITER iter = m_macMap.begin();
+        MACMAPITER end = m_macMap.end();
+        std::list<mac_inter *> localList;
+        for (; iter != end; ++iter)
+        {
+            LinkParam *localParam2 = (LinkParam *)((*iter)->p);
+            if (localparam == localParam2)
+            {
+                count++;
+                localList.push_back(*iter);
+            }
+        }
+
+        std::list<mac_inter *>::iterator iter1 = localList.begin();
+        std::list<mac_inter *>::iterator end1 = localList.end();
+        for (; iter1 != end1; iter1++)
+        {
+            iterFind = m_macMap.find(*iter1);
+            if (m_macMap.end() != iterFind)
+            {
+                LinkParam *localParam2 = (LinkParam *)((*iter1)->p);
+                if (localparam == localParam2)
+                {
+                    count2++;
+                    m_macMap.erase(iterFind);
+                    delete *iter1;
+                }
+            }
+        }
+    }
+    printf("delete %d  macs find %d CurmacMap size %ld\n", count, count2, m_macMap.size());
+    if (findItem)
+    {
+        int ret = localparam->delRef();
+        printf("delete link param %d HUB::%s %d\n", ret, __FUNCTION__, __LINE__);
+    }
+    return count;
+}
+/*
+int CHub::sendToAllPort(uint8_t *data, int len, void *param)
+{
+
+    void *ret = NULL;
+    int count = 0;
+    PORTSET::iterator iter = m_portSet.begin();
+    PORTSET::iterator end  = m_portSet.end();
+    for (; iter != end; ++iter)
+    {
+        LinkParam *localparam = (LinkParam *)*iter;
+        if (param != localparam)
+        {
+            localparam->addRef();
+            Interface *inter = localparam->interFace;
+            inter->writeData(data, len, 1, param, localparam);
+            localparam->delRef();
+            count++;
+        }
+    }
+    return count;
+}*/
+
 
 int CHub::sendToAllPort(uint8_t *data, int len, void *param)
 {
-    std::vector<void *> list;
-    m_critical.lock();
     void *ret = NULL;
-    PORTSET::iterator iter = m_portSet.begin();
-    PORTSET::iterator end  = m_portSet.end();
-    for (; iter != end; iter++)
-    {
-        list.push_back(*iter);
-    }
-    m_critical.unlock();
-
-    std::vector<void *>::iterator iter1 = list.begin();
-    std::vector<void *>::iterator end1 = list.end();
-
     int count = 0;
-    bool find = false;
-    for (; iter1 != end1; iter1++)
+    IDMAPPORT::iterator iter = m_idMap.begin();
+    IDMAPPORT::iterator end  = m_idMap.end();
+    IdMapPort *find = findIDPort(param);
+    if(find == NULL)
     {
-        find = false;
-        LinkParam *param1 = (LinkParam *)*iter1;
-       
-        m_critical.lock();
-        if (m_portSet.end() != m_portSet.find(param1))
+        return 0;
+    }
+
+    for (; iter != end; ++iter)
+    {
+        LinkParam *localparam; 
+        IdMapPort *idmap = *iter;
+        if (find != idmap)
         {
-            find = true;
-            if (param != param1)
-            {
-                param1->addRef();
-            }
+            localparam = (LinkParam *)idmap->getFrist();
+            localparam->addRef();
+            Interface *inter = localparam->interFace;
+            inter->writeData(data, len, 1, param, localparam);
+            localparam->delRef();
+            count++;
         }
-        m_critical.unlock();
-       
-        if (find)
-        {
-            Interface *inter = (Interface *)(param1->interFace);
-            if (param != param1)
-            {
-                inter->writeData(data, len, 1, param, param1);
-                param1->delRef();
-            }
-            else
-            {
-                //if (2 == param1->interFace->m_type)
-                //{
-                    //printf("find myself %s %d \n", __FILE__, __LINE__);
-                //}
-            }
-        }
-        count++;
     }
     return count;
 }
@@ -827,7 +859,129 @@ int CHub::icmpPacketTooBig(NetInfo *netInfo, uint8_t *recData, uint8_t *sendData
 
     uint8_t *curPost = (uint8_t *)sendData + headLen + sizeof(icmp_mtu_hdr);
     memcpy(curPost, recData + 14 + netInfo->otherLen, netInfo->l3HeadLen + 8);
-    icmpTobig->chksum = (uint16_t) ~(uint32_t)lwip_standard_chksum(icmpTobig, 8 + netInfo->l3HeadLen + 8);
+    icmpTobig->chksum = (uint16_t)~(uint32_t)lwip_standard_chksum(icmpTobig, 8 + netInfo->l3HeadLen + 8);
     int sendLen = 14 + netInfo->otherLen + netInfo->l3HeadLen + 8 + netInfo->l3HeadLen + 8;
     return sendLen;
+}
+
+int CHub::initData()
+{
+    int oneSize = sizeof(HubMidBuf);
+    int count = 1000;
+    uint8_t *buf = new uint8_t[count * oneSize];
+    for (int i = 0; i < count; i++)
+    {
+        HubMidBuf *lo = (HubMidBuf *)buf;
+        lo->len = 0;
+        lo->type = 1;
+        m_freeList.push(lo);
+        buf += oneSize;
+    }
+    return count;
+}
+
+int CHub::sendArp(uint8_t *data, int len, void *param, NetInfo *netinfo)
+{
+    compact_eth_hdr *pEth = (compact_eth_hdr *)(data);
+    uint32_t headLen = 14;
+    headLen += netinfo->otherLen;
+    arp_hdr *psArp = (arp_hdr *)(data + headLen);
+    uint8_t srcmac[6];
+    uint8_t dstmac[6];
+    LinkParam *srcparam = (LinkParam *)param;
+    if (1 == ntohs(psArp->optype))
+    {
+        memcpy(dstmac, data, 6);
+        memcpy(srcmac, data + 6, 6);
+
+        memcpy(data, srcmac, 6);
+        memcpy(data + 6, dstmac, 6);
+
+        psArp->optype = htons(2);
+        std::swap(psArp->srcip, psArp->dstip);
+        memcpy(psArp->dstmac, srcmac, 6);
+        memcpy(psArp->srcmac, dstmac, 6);
+        srcparam->addRef();
+        sendData(srcparam, NULL, data, len, param);
+        return 0;
+    }
+    return 1;
+}
+
+int CHub::addIDPort(void *param)
+{    
+    LinkParam *localparam = (LinkParam *)param;
+    m_tmpIdMap.m_id = localparam->id;
+
+    IDMAPPORT::iterator it = m_idMap.find(&m_tmpIdMap);
+    IdMapPort *item = NULL; 
+    if(it == m_idMap.end())
+    {
+        item = new IdMapPort;
+        item->m_id = localparam->id;
+        item->addPort(param);
+        m_idMap.insert(item);
+        printf("add id %d HUB::%s %d\n", m_tmpIdMap.m_id, __FUNCTION__, __LINE__);
+    }
+    else    
+    {
+        item = *it;
+        bool find = item->find(param);
+        if (find == false)
+        {
+            item->addPort(param);
+        }
+        printf("exist id %d HUB::%s %d\n", m_tmpIdMap.m_id, __FUNCTION__, __LINE__);
+    }
+    return 0;
+}
+int CHub::rmIDPort(void *param)
+{
+    LinkParam *localparam = (LinkParam *)param;
+    m_tmpIdMap.m_id = localparam->id;
+    IDMAPPORT::iterator it = m_idMap.find(&m_tmpIdMap);
+    IdMapPort *item = NULL;
+    if(it != m_idMap.end())
+    {
+        item = *it;
+        bool find = item->find(param);
+        if (find)
+        {
+            item->delPort(param);
+            if (item->isEmpty())
+            {
+                m_idMap.erase(it);
+                delete item;
+                printf("clean id %d HUB::%s %d\n", m_tmpIdMap.m_id, __FUNCTION__, __LINE__);
+            }
+        }
+    }
+    return 0;
+}
+
+IdMapPort *CHub::findIDPort(void *param)
+{
+    LinkParam *localparam = (LinkParam *)param;
+    m_tmpIdMap.m_id = localparam->id;
+    IDMAPPORT::iterator it = m_idMap.find(&m_tmpIdMap);
+    IdMapPort *item = NULL;
+    if (it != m_idMap.end())
+    {
+        item = *it;
+    }
+    return item;
+}
+
+void *CHub::getOneLikelyPort(void *param, std::size_t size)
+{
+    LinkParam *localparam = (LinkParam *)param;
+    m_tmpIdMap.m_id = localparam->id;
+    IDMAPPORT::iterator it = m_idMap.find(&m_tmpIdMap);
+    IdMapPort *item = NULL;
+    if(it != m_idMap.end())
+    {
+        item = *it;
+        return item->getItem(size);
+    }
+    return NULL;    
 }
