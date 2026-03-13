@@ -89,7 +89,7 @@ int CLinkPeer::delRef()
         {
             char client_ip[INET6_ADDRSTRLEN];
             inet_ntop(AF_INET6, m_ipaddr.ipv6, client_ip, sizeof(client_ip));
-            NOTICE("clean socket close type: [" << client_ip << "] port: " << htons(m_port) << "  function: " << __FUNCTION__ << " line: " << __LINE__);
+            printf("clean socket close type:%d ip:[%s] port:%u CLinkPeer::%s line:%d\n", m_linkType, client_ip , htons(m_port), __FUNCTION__, __LINE__);
         }
         else
         {
@@ -114,6 +114,7 @@ int CLinkPeer::regtoUp(void *mgr, int type)
     {
         ((CNetPort*)m_linkPort)->setId(m_id);
     }
+    ((CNetPort*)m_linkPort)->setKeyPath(m_keyPath);
     ((CNetPort*)m_linkPort)->set(mgr ,this);
     int ret = ((CNetPort*)m_linkPort)->regtoUp(mgr, type);
     return ret;

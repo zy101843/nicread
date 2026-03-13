@@ -28,6 +28,7 @@ struct ADDNETPort
     std::time_t lastTime;
     uint8_t      mac[6];
     int          id;
+    std::string  keyPath;
 };
 
 
@@ -39,14 +40,13 @@ public:
 public:
     void start();
     void stop();
-    void *addListen(const char *ip, uint16_t port);
-    void *addListenV6(const char *ip, uint16_t port);
+    void *addListen(const char *ip, uint16_t port, std::string &path);
+    void *addListenV6(const char *ip, uint16_t port, std::string &path);
     void *addUdpRec(const char *ip, uint16_t port);
     void *addConnect(ADDNETPort *item);
-    void *addConnect(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id);
-    void *addConnectV6(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id);
-    void *addConnect(uint32_t ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id);
-    void *addConnectV6(uint32_t *ip, uint16_t port, int type, uint16_t bindport, void *dist,uint8_t *mac, uint32_t id);
+    void *addConnect(std::string &ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id, std::string &path);
+    void *addConnect(uint32_t ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id, std::string &path);
+    void *addConnectV6(uint32_t *ip, uint16_t port, int type, uint16_t bindport, void *dist,uint8_t *mac, uint32_t id, std::string &path);
     void *addUDPConnect(ADDNETPort *item);
     void *addUDPConnect(const char *ip, uint16_t port, int type, void *dist);
     void *addUDPConnect(uint32_t ip, uint16_t port, int type, void *dist);

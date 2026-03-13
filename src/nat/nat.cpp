@@ -337,6 +337,11 @@ int Nat::writeData(uint8_t *data, int len, int type, void *srcparam, void *dstPa
     return len;
 }
 
+int Nat::reg(int , void *)
+{
+    return 0;
+}
+
 int Nat::addData(uint8_t *data, int len, void *param)
 {
     bool arp = false;
@@ -349,13 +354,36 @@ int Nat::addData(uint8_t *data, int len, void *param)
     return len;
 }
 
+int Nat::addData(HubMidBuf *buf, void *param)
+{
+    bool arp = false;
+    uint8_t *outdata = process(buf->buf, 2, buf->len, arp);
+    if (outdata == NULL)
+    {
+        m_hub->returnMidBuf(buf);
+        return 0;
+    }
+    m_hub->addData(buf, &m_linkParm);
+    return buf->len;
+}
+
+HubMidBuf *Nat::getMidBuf()
+{
+    return m_hub->getMidBuf();
+}
+void Nat::returnMidBuf(HubMidBuf *buf)
+{
+    m_hub->returnMidBuf(buf);
+}
+
+
 void Nat::workThread()
 {
     uint8_t *data;
     int len;
     midInterface *mid = this;
     m_linkParm.m_ext = NULL;
-    m_hub->addData(NULL, -1, &m_linkParm);
+    m_hub->reg(-1, &m_linkParm);
     while (m_stop)
     {
         len = -1;

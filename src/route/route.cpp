@@ -76,7 +76,8 @@ int Route::readCof()
                 }
                 m_gwList.push_back(ipm);
                 mac = (char *)ipm->mac;
-                memcpy(ipm->mac, m_macGw, 6);
+                memcpy(mac, m_macGw, 6);
+                memset(mac + 6, 0, 6);
             }
             m_routeTable->addRoute(path, (const char *)mac);
         }
@@ -100,13 +101,22 @@ int Route::readCof()
             memcpy(route_arpData + 28, &m_Ip, 4);
         }
     }
+    std::vector<ipMap *>::iterator iter = m_gwList.begin();
+    for (; iter != m_gwList.end(); iter++)
+    {   
+        uint8_t *local = (*iter)->mac;
+        memcpy(local + 6, m_mac, 6);
+        printf("%hhx:%hhx:%hhx:%hhx:%hhx:%hhx  %hhx:%hhx:%hhx:%hhx:%hhx:%hhx\n", local[0], local[1], local[2], local[3], local[4], local[5],
+        local[6], local[7], local[8], local[9], local[10], local[11]);
+    }
+    m_routeTable->setDefaultMac((const char *)m_defaultMac, (const char *)m_mac);
     return 0;
 }
 
 int Route::start()
 {  
     m_linkParm.m_ext = m_mac;
-    m_hub->addData(NULL, -1, &m_linkParm);
+    m_hub->reg(-1, &m_linkParm);
     return 1;
 }
 
@@ -114,38 +124,40 @@ int Route::writeData(uint8_t *data, int len, int type, void *srcparam, void *dst
 {
     uint16_t port = 0;
     int ret = 0;
-    NetInfo *netInfo = &m_netnetInfo;
+    NetInfo netInfo;
     bool arp = false;
-    ret = analysisIPHead(data, len, netInfo);
+    ret = analysisIPHead(data, len, &netInfo);
     if (0 == ret)
     {
         return 0;
     }
+    return writeData(data, len, &netInfo, type, srcparam, dstParam);
+}
+
+ int Route::writeData(uint8_t *data, int len, void *net, int type, void *srcparam, void *dstParam)
+ {
+    int ret = 0;
+    NetInfo *netInfo = (NetInfo *)net;
+    m_netnetInfo     = netInfo; 
+    bool arp = false;
     if (netInfo->tuple.isIPV6)
     {
         return 0;
     }
-    int buflen = netInfo->totalLen + 14 + netInfo->otherLen;
-    if (len < buflen)
-    {
-        return 0;
-    }
-    arp = netInfo->isARP;
-    if (arp)
+    if (netInfo->isARP)
     {
         arpV4(data, len);
-        return len;
+        return 0;
     }
     if(netInfo->isV4Broadcast)
     {
         return 0;
     }  
-    if (m_netnetInfo.tuple.dstIP.v4 == m_IpHost)
+    if (netInfo->tuple.dstIP.v4 == m_IpHost)
     {
-        if (1 == m_netnetInfo.nextProtocol)
+        if (1 == netInfo->nextProtocol)
         {
             icmpV4(data, len);
-            return len;
         }
         return 0;
     }
@@ -153,21 +165,14 @@ int Route::writeData(uint8_t *data, int len, int type, void *srcparam, void *dst
     {
         return 0;
     }
-    char *mac = NULL;
-    mac = m_routeTable->findRoute(netInfo->tuple.dstIP.v4);
-    if (mac == NULL)
-    {
-        mac = (char *)m_defaultMac;
-    }
-    memcpy(data, mac, 6);
-    memcpy(data + 6, m_mac, 6);
-    m_hub->addData(data, len, &m_linkParm);
+    char *mac = m_routeTable->findRoute(netInfo->tuple.dstIP.v4);
+    memcpy(data, mac, 12);
     return 1;
-}
+ }
 
 void Route::icmpV4(uint8_t *data, int len)
 {
-    uint32_t headLen = 14 + m_netnetInfo.l3HeadLen;
+    uint32_t headLen = 14 + m_netnetInfo->l3HeadLen;
     compact_eth_hdr *pEth = (compact_eth_hdr *)(data);
     ICMPhead *icmp = (ICMPhead *)(data + headLen);
     bool needReplay = false;
@@ -179,15 +184,15 @@ void Route::icmpV4(uint8_t *data, int len)
         memcpy(m_sendData + 6, pEth->h_dest, 6);
         compact_ip_hdr *ipv4Head;
         ipv4Head = (compact_ip_hdr *)(m_sendData + 14);
-        ipv4Head->saddr = m_netnetInfo.ipv4Head->daddr;
-        ipv4Head->daddr = m_netnetInfo.ipv4Head->saddr;
+        ipv4Head->saddr = m_netnetInfo->ipv4Head->daddr;
+        ipv4Head->daddr = m_netnetInfo->ipv4Head->saddr;
 
-        AdjustIPHeadV4(&m_netnetInfo, m_sendData);
+        AdjustIPHeadV4(m_netnetInfo, m_sendData);
 
         ICMPhead *dicmp = (ICMPhead *)(m_sendData + headLen);
         dicmp->type     = 0;
         dicmp->checkSum = 0;
-        dicmp->checkSum = inet_chksum(dicmp, len - 14 - m_netnetInfo.otherLen - m_netnetInfo.l3HeadLen);
+        dicmp->checkSum = inet_chksum(dicmp, len - 14 - m_netnetInfo->otherLen - m_netnetInfo->l3HeadLen);
         int sendLen = len;
         m_hub->addData(m_sendData, sendLen, &m_linkParm);
     }
@@ -204,13 +209,6 @@ void Route::arpV4(uint8_t *data, int len)
     {
     case 1:
     {
-        /*
-        ip.ip.v4 = ntohl(psArp->srcip);
-        if ((ip.ip.v4 & m_MaskHost) == m_IpHostMask)
-        {
-            m_arpMap->addItemV4(ip, psArp->srcmac);
-        }
-        */
         if (m_Ip != psArp->dstip)
         {
             needReplay = true;

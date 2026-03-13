@@ -18,6 +18,7 @@ public:
 public:
    int      write(uint8_t *data, int len);
    uint8_t *realen(int &len);
+   int      sha256(unsigned char *out, uint8_t *in, int inlen);
 public:
     unsigned char *m_public;
     int            m_pubenLen;
@@ -30,5 +31,6 @@ public:
 public:
     DH       *m_dh;
     EVP_PKEY *m_key;
+    unsigned char m_hash[32];
    
 };

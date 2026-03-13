@@ -65,7 +65,11 @@ public:
     virtual ~Nat();
 public:
     virtual int writeData(uint8_t *data, int len, int type, void *srcparam, void *dstParam);
+    virtual int reg(int len, void *param);
     virtual int addData(uint8_t *data, int len, void *param);
+    virtual int addData(HubMidBuf *buf, void *param);
+    virtual HubMidBuf *getMidBuf();
+    virtual void  returnMidBuf(HubMidBuf *buf);
 public:
     void start();
     void workThread();

@@ -4,6 +4,7 @@
 #include "../NetModeBase.h"
 #include <functional>
 
+extern std::time_t g_curTime;
 Filter::Filter()
 {
 }
@@ -53,12 +54,15 @@ CHub::CHub()
     m_dropVec = NULL;
 
     m_haveVirNic = false;
-    m_aut        = NULL;
-    m_PackCount  = 0;
+    m_aut = NULL;
+    m_PackCount = 0;
     sem_init(&m_sem, 0, 1);
     pthread_mutex_init(&m_mutex, NULL);
     pthread_mutex_init(&m_mutexBuf, NULL);
 
+    m_curTime = time(NULL);
+    m_processData[0] = &CHub::porcData;
+    m_processData[1] = &CHub::procLink;
     initData();
 }
 
@@ -73,7 +77,7 @@ void CHub::start()
 
 void CHub::setVnicNat(uint32_t ip, uint32_t mask)
 {
-    m_vip   = ip;
+    m_vip = ip;
     m_vmask = mask;
 }
 
@@ -87,7 +91,7 @@ void arpV4(uint8_t *data, int len, void *param)
 {
     compact_eth_hdr *pEth = (compact_eth_hdr *)(data);
     uint32_t headLen = 14 + 0;
-    arp_hdr *psArp = (arp_hdr *)(data + headLen);
+    arp_hdr *psArp   = (arp_hdr *)(data + headLen);
 
     bool needReplay = false;
 
@@ -103,7 +107,6 @@ void arpV4(uint8_t *data, int len, void *param)
         inet_ntop(AF_INET, &(psArp->dstip), buf2, 128);
         if (NULL == param)
         {
-            
         }
         break;
     }
@@ -216,58 +219,106 @@ void CHub::AdjustTcpCheckSumV6(NetInfo *netInfo, uint8_t *data, int len)
     tcpHead->CheckSum = chk1;
 }
 
+int CHub::reg(int len, void *param)
+{
+    if (len != -1 && len != -2)
+    {
+        return 0;
+    }
+    HubMidBuf *lo = getMidBuf();
+    if (NULL == lo)
+    {
+        return 0;
+    }
+    lo->len   = len;
+    lo->index = 1;
+    lo->param = param;
+    postData(lo);
+    return len;
+}
+
 int CHub::addData(uint8_t *data, int len, void *param)
 {
-    if (len > 0 && len < 30)
+    if (len < 30 || len > 1580)
     {
         return 0;
     }
-    if (len > 1580)
+    if ((*data & 0x3) == 0x01)
     {
         return 0;
     }
-
-    if (len < 0)
+    HubMidBuf *lo = getMidBuf();
+    if (NULL == lo)
     {
-        if (len != -1 && len != -2)
-        {
-            return 0;
-        }
+        return 0;
     }
+    
+    memcpy(lo->buf, data, len);
+    lo->len = len;
+    lo->index = 0;
+    lo->param = param;
+    postData(lo);
+    return len;
+}
 
+int CHub::addData(HubMidBuf *buf, void *param)
+{
+    if (buf->len > 1580 || buf->len < 30)
+    {
+        returnMidBuf(buf);
+        return 0;
+    }
+    buf->index = 0;
+    buf->param = param;
+    postData(buf);
+    return buf->len;
+}
+int  CHub::postData(HubMidBuf *buf)
+{
+    pthread_mutex_lock(&m_mutex);
+    m_listBuf.push(buf);
+    pthread_mutex_unlock(&m_mutex);
+    sem_post(&m_sem);
+    return 1;
+}
+
+HubMidBuf *CHub::getMidBuf()
+{
     HubMidBuf *lo = NULL;
     pthread_mutex_lock(&m_mutexBuf);
     if (m_freeList.size() > 0)
     {
         lo = m_freeList.top();
         m_freeList.pop();
+        pthread_mutex_unlock(&m_mutexBuf);
     }
     else
     {
+        pthread_mutex_unlock(&m_mutexBuf);
         lo = new HubMidBuf;
         lo->type = 2;
     }
-    pthread_mutex_unlock(&m_mutexBuf);
-    if (lo)
-    {
-
-        lo->len = len;
-        if (len > 0)
-        {
-            memcpy(lo->buf, data, len);
-        }
-        lo->param = param;
-        pthread_mutex_lock(&m_mutex);
-        m_listBuf.push(lo);
-        pthread_mutex_unlock(&m_mutex);
-    }
-    sem_post(&m_sem);
-    return len;
+    return lo;
 }
+void CHub::returnMidBuf(HubMidBuf *buf)
+{
+    if (1 == buf->type)
+    {
+        pthread_mutex_lock(&m_mutexBuf);
+        m_freeList.push(buf);
+        pthread_mutex_unlock(&m_mutexBuf);
+    }
+    else
+    {
+        delete buf;
+    }
+}
+
 void CHub::workThread()
 {
     HubMidBuf *lo = NULL;
     bool condition = false;
+    int index;
     while (true)
     {
         sem_wait(&m_sem);
@@ -275,6 +326,7 @@ void CHub::workThread()
         {
             condition = false;
             lo = NULL;
+           
             pthread_mutex_lock(&m_mutex);
             if (m_listBuf.size() > 0)
             {
@@ -283,61 +335,35 @@ void CHub::workThread()
                 condition = !m_listBuf.empty();
             }
             pthread_mutex_unlock(&m_mutex);
+            
             if (lo)
             {
-                addData1(lo->buf, lo->len, lo->param);
-                if (1 == lo->type)
-                {
-                    pthread_mutex_lock(&m_mutexBuf);
-                    m_freeList.push(lo);
-                    pthread_mutex_unlock(&m_mutexBuf);
-                }
-                else
-                {
-                    delete lo;
-                }
+                (this->*m_processData[lo->index])(lo->buf, lo->len, lo->param);
+                returnMidBuf(lo);
             }
         } while (condition);
     }
 }
 
-const uint8_t MCASET_MAC[4] = {0x01, 0x00, 0x5e, 0x00};
-int CHub::addData1(uint8_t *data, int len, void *param)
+int CHub::procLink(uint8_t *data, int len, void *param)
 {
-
     LinkParam *srcparam = (LinkParam *)param;
-    uint32_t local = *(uint32_t *)data;
     if (len == -1)
     {
         justAddPort(param);
         if (1 == srcparam->linkType)
         {
-            if (1 == srcparam->linkSubType)
-            {
-                if (NULL != srcparam->m_ext)
-                {
-                    uint8_t *locamac = (uint8_t *)(srcparam->m_ext);
-                    updateMac(locamac, param);
-                    printf("Add mac in nic: %02X:%02X:%02X:%02X:%02X:%02X\n", locamac[0], locamac[1], locamac[2], locamac[3], locamac[4], locamac[5]);
-                }
-            }
+            uint8_t *ext = NULL;
+            ext = (uint8_t *)(srcparam->m_ext);
             if (2 == srcparam->linkSubType)
             {
                 m_haveVirNic = true;
-                m_aut = (uint8_t *)(srcparam->m_ext);
-                if (NULL != m_aut)
-                {
-                    updateMac(m_aut + 6, param);
-                }
+                ext += 6;
             }
-            else if (3 == srcparam->linkSubType)
+            if (NULL != ext)
             {
-                if (NULL != srcparam->m_ext)
-                {
-                    uint8_t *locamac = (uint8_t *)(srcparam->m_ext);
-                    updateMac(locamac, param);
-                    printf("add route mac: %02X:%02X:%02X:%02X:%02X:%02X\n", locamac[0], locamac[1], locamac[2], locamac[3], locamac[4], locamac[5]);
-                }
+                updateMac(ext, param, true);
+                printf("Add mac in nic: %02X:%02X:%02X:%02X:%02X:%02X\n", ext[0], ext[1], ext[2], ext[3], ext[4], ext[5]);
             }
         }
         else if (2 == srcparam->linkType)
@@ -358,28 +384,24 @@ int CHub::addData1(uint8_t *data, int len, void *param)
             }
         }
         m_PackCount = 0;
-        return 0;
     }
     else if (len == -2)
     {
         cleanLink(param);
-        return 0;
     }
-    if (len < 0)
-    {
-        return 0;
-    }
+    return 0;
+}
 
-    local &= 0x00ffffff;
-    if (local == 0x5e0001)
+const uint8_t MCASET_MAC[4] = {0x01, 0x00, 0x5e, 0x00};
+int CHub::porcData(uint8_t *data, int len, void *param)
+{
+    LinkParam *srcparam = (LinkParam *)param;
+    uint8_t local = *data;
+    local &= 0x03;
+    if (local == 0x01)
     {
         return 0;
     }
-    if (local == 0xc28001)
-    {
-        return 0;
-    }
-
     int ret = 0;
     LinkParam *localParam = (LinkParam *)param;
     NetInfo netInfo;
@@ -393,6 +415,7 @@ int CHub::addData1(uint8_t *data, int len, void *param)
     {
         return 0;
     }
+
     int buflen = netInfo.totalLen + 14 + netInfo.otherLen;
     if (len < buflen)
     {
@@ -402,8 +425,7 @@ int CHub::addData1(uint8_t *data, int len, void *param)
     bool sendtoAll = false;
     if (netInfo.isARP)
     {
-        updateMac(data + 6, param);
-        if(m_vip != 0 || (srcparam->linkType == 1) )
+        if (m_vip != 0 || (srcparam->linkType == 1))
         {
             int optype = 0;
             uint32_t dip = arpV4(data, len, optype);
@@ -416,7 +438,6 @@ int CHub::addData1(uint8_t *data, int len, void *param)
     }
     if (ICMPV6 == netInfo.nextProtocol && netInfo.isV6Multicast)
     {
-        updateMac(data + 6, param);
         sendtoAll = true;
     }
     if (netInfo.isV4Broadcast)
@@ -429,14 +450,12 @@ int CHub::addData1(uint8_t *data, int len, void *param)
         {
             sendtoAll = true;
         }
+        else
+        {
+            return 0;
+        }
     }
-
-    if(m_PackCount < 1000)
-    {
-        updateMac(data + 6, param);
-        m_PackCount++;
-    }
-    
+    updateMac(data + 6, param);
     if (sendtoAll)
     {
         sendToAllPort(data, len, param);
@@ -444,24 +463,33 @@ int CHub::addData1(uint8_t *data, int len, void *param)
     else
     {
         locapPort = findPort(data, netInfo.hashValue);
-        if (nullptr != locapPort)
+        LinkParam *localParam = (LinkParam *)locapPort;
+        if (localParam != nullptr)
         {
-            if (netInfo.isARP && (((LinkParam *)locapPort)->linkType == 2))
+            if (3 == localParam->linkSubType)
             {
-                if (1 == sendArp(data, len, param, &netInfo))
+                Interface *inter = localParam->interFace;
+                int lret = inter->writeData(data, len, &netInfo, 2, param, localParam);
+                if (1 != lret)
                 {
-                    tcpFragmentation(locapPort, &netInfo, data, len, param);
+                    return 0;
                 }
-                else
+                locapPort = findPort(data, netInfo.hashValue);
+                localParam->delRef();
+                param = localParam;
+                localParam = (LinkParam *)locapPort;
+                if (localParam == nullptr)
                 {
-                    ((LinkParam *)locapPort)->delRef();
+                    return 0;
                 }
             }
-            else
-            {
-                tcpFragmentation(locapPort, &netInfo, data, len, param);
-            }
+            tcpFragmentation(localParam, &netInfo, data, len, param);
         }
+    }
+    if (g_curTime > m_curTime)
+    {
+        cleanMac(param);
+        m_curTime = g_curTime;
     }
     return len;
 }
@@ -525,72 +553,22 @@ int CHub::findMSS(NetInfo *netInfo, uint8_t *data)
 int CHub::tcpFragmentation(void *dstParam, NetInfo *netInfo, uint8_t *data, int len, void *param)
 {
     LinkParam *loacalParam = (LinkParam *)dstParam;
-    LinkParam *src = (LinkParam *)param;
     Interface *inter = loacalParam->interFace;
-    bool find = true;
-    
-    if (1 == loacalParam->linkType)
+    int adjlen = len;
+    if ((1 != loacalParam->linkType) && (netInfo->nextProtocol == IP_TCP_TYPE) && (false == netInfo->tuple.isIPV6))
     {
-        inter->writeData(data, len, 2, param, dstParam);
-    }
-    else
-    {
-        switch (netInfo->nextProtocol)
+        uint8_t flag = netInfo->tcpHead->FLAG;
+        uint8_t ack = netInfo->tcpHead->FLAG;
+        if (0x02 == flag)
         {
-        case IP_UDP_TYPE:
-        {
-            if (len <= 1514)
-            {
-                inter->writeData(data, len, 2, param, dstParam);
-            }
-            else
-            {
-                printf("the udp sen is error %d %s %d\n", len, __FUNCTION__, __LINE__);
-            }
-            break;
+            adjlen = findMSS(netInfo, data);
         }
-        case IP_TCP_TYPE:
+        else if (0x12 == flag)
         {
-            if (false == netInfo->tuple.isIPV6)
-            {
-                uint8_t flag = netInfo->tcpHead->FLAG;
-                uint8_t ack = netInfo->tcpHead->FLAG;
-                if (0x02 == flag)
-                {
-                    int adjlen = findMSS(netInfo, data);
-                    inter->writeData(data, adjlen, 2, param, dstParam);
-                }
-                else if (0x12 == flag)
-                {
-
-                    int adjlen = findMSS(netInfo, data);
-                    inter->writeData(data, adjlen, 2, param, dstParam);
-                }
-                else
-                {
-                    inter->writeData(data, len, 2, param, dstParam);
-                }
-            }
-            else
-            {
-                inter->writeData(data, len, 2, param, dstParam);
-            }
-            break;
-        }
-        default:
-        {
-            if (len <= 1514)
-            {
-                inter->writeData(data, len, 2, param, dstParam);
-            }
-            else
-            {
-                printf("unknow sen is error %d %s %d\n", len, __FUNCTION__, __LINE__);
-            }
-            break;
-        }
+            adjlen = findMSS(netInfo, data);
         }
     }
+    inter->writeData(data, adjlen, 2, param, dstParam);
     loacalParam->delRef();
     return len;
 }
@@ -623,58 +601,90 @@ int CHub::updateMac(uint8_t *data, void *param)
     {
         return 0;
     }
-    if (0x01 == ((*data) & 0xFE))
+    IdMapPort *find = findIDPort(param);
+    if (find == NULL)
     {
-        printf("error mac %x\n", *data);
+        return 0;
+    }
+
+    mac_inter loc(data);
+    MACMAPITER iter = m_macMap.find(&loc);
+
+    if (m_macMap.end() == iter)
+    {
+        mac_inter *newmac = new mac_inter(data);
+        newmac->lastTime = g_curTime;
+        newmac->m_NotStatic = true;
+        newmac->m_ListIter = m_macList.insert(m_macList.end(), newmac);
+        newmac->p = find;
+        m_macMap.insert(newmac);
+        printf("add mac %02X:%02X:%02X:%02X:%02X:%02X id:%d\n", data[0], data[1], data[2], data[3], data[4], data[5], find->m_id);
+    }
+    else
+    {
+        mac_inter *oldmac = *iter;
+        if (false == oldmac->m_NotStatic)
+        {
+            return 0;
+        }
+        if (find != oldmac->p)
+        {
+            oldmac->p = find;
+        }
+        if (g_curTime > oldmac->lastTime)
+        {
+            oldmac->lastTime = g_curTime;
+            m_macList.erase(oldmac->m_ListIter);
+            oldmac->m_ListIter = m_macList.insert(m_macList.end(), oldmac);
+        }
+    }
+    return 0;
+}
+
+int CHub::updateMac(uint8_t *data, void *param, bool staticMac)
+{
+    IdMapPort *find = findIDPort(param);
+    (void)staticMac;
+    if (find == NULL)
+    {
+        return 0;
     }
     mac_inter loc(data);
     MACMAPITER iter = m_macMap.find(&loc);
     if (m_macMap.end() == iter)
     {
         mac_inter *newmac = new mac_inter(data);
-        newmac->p = param;
+        newmac->lastTime = g_curTime;
+        newmac->m_NotStatic = false;
+        newmac->p = find;
         m_macMap.insert(newmac);
+        printf("add static mac %02X:%02X:%02X:%02X:%02X:%02X id:%d\n", data[0], data[1], data[2], data[3], data[4], data[5], find->m_id);
     }
     else
     {
-        if (param != (*iter)->p)
-        {
-            (*iter)->p = param;
-        }
+        printf("add static mac Error %02X:%02X:%02X:%02X:%02X:%02X id:%d\n", data[0], data[1], data[2], data[3], data[4], data[5], find->m_id);
     }
     return 0;
 }
-/*
-void *CHub::findPort(uint8_t *data)
-{
-    mac_inter loc(data);
-    LinkParam *linkParam = NULL;
-    MACMAPITER iter;
-    void *ret = NULL;
-
-    iter = m_macMap.find(&loc);
-    if (m_macMap.end() != iter)
-    {
-        linkParam = ((LinkParam *)((*iter)->p));
-        linkParam->addRef();
-        ret = linkParam;
-    }
-    return ret;
-}
-*/
 void *CHub::findPort(uint8_t *data, std::size_t hashCode)
 {
     mac_inter loc(data);
     LinkParam *linkParam = NULL;
-    LinkParam *linkParam1 = NULL;
     MACMAPITER iter;
     void *ret = NULL;
 
     iter = m_macMap.find(&loc);
     if (m_macMap.end() != iter)
     {
-        linkParam1 = ((LinkParam *)((*iter)->p));
-        linkParam   = (LinkParam *) getOneLikelyPort(linkParam1, hashCode);
+        mac_inter *find = *iter;
+        if (find->m_NotStatic && (g_curTime > find->lastTime))
+        {
+            find->lastTime = g_curTime;
+            m_macList.erase(find->m_ListIter);
+            find->m_ListIter = m_macList.insert(m_macList.end(), find);
+        }
+        IdMapPort *item = (IdMapPort *)(find->p);
+        linkParam = (LinkParam *)(item->getFrist());
         linkParam->addRef();
         ret = linkParam;
     }
@@ -695,7 +705,6 @@ void CHub::justAddPort(void *port)
     {
         printf("alread hava link param HUB::%s %d\n", __FUNCTION__, __LINE__);
     }
-
 }
 
 int CHub::cleanLink(void *param)
@@ -707,24 +716,28 @@ int CHub::cleanLink(void *param)
     int count = 0;
     int count2 = 0;
     bool findItem = false;
-
+    bool findOneItem = false;
     postSet = m_portSet.find(param);
+    int cleanma = 0;
+    IdMapPort *idmap;
     if (m_portSet.end() != postSet)
     {
         m_portSet.erase(postSet);
-        rmIDPort(param);
-        findItem = true;
+        idmap = findIDPort(param);
+        cleanma = rmIDPort(param);
+        findOneItem = true;
+        findItem = cleanma == 1;
     }
 
     if (findItem)
     {
         MACMAPITER iter = m_macMap.begin();
-        MACMAPITER end = m_macMap.end();
+        MACMAPITER end  = m_macMap.end();
         std::list<mac_inter *> localList;
         for (; iter != end; ++iter)
         {
-            LinkParam *localParam2 = (LinkParam *)((*iter)->p);
-            if (localparam == localParam2)
+            IdMapPort *localParam2 = (IdMapPort *)((*iter)->p);
+            if (idmap == localParam2)
             {
                 count++;
                 localList.push_back(*iter);
@@ -733,68 +746,48 @@ int CHub::cleanLink(void *param)
 
         std::list<mac_inter *>::iterator iter1 = localList.begin();
         std::list<mac_inter *>::iterator end1 = localList.end();
-        for (; iter1 != end1; iter1++)
+        for (; iter1 != end1; ++iter1)
         {
             iterFind = m_macMap.find(*iter1);
             if (m_macMap.end() != iterFind)
             {
-                LinkParam *localParam2 = (LinkParam *)((*iter1)->p);
-                if (localparam == localParam2)
+                IdMapPort *localParam2 = (IdMapPort *)((*iter1)->p);
+                if (idmap == localParam2)
                 {
                     count2++;
+                    if ((*iterFind)->m_NotStatic)
+                    {
+                        m_macList.erase((*iterFind)->m_ListIter);
+                    }
                     m_macMap.erase(iterFind);
                     delete *iter1;
                 }
             }
         }
     }
-    printf("delete %d  macs find %d CurmacMap size %ld\n", count, count2, m_macMap.size());
-    if (findItem)
+    if (findOneItem)
     {
         int ret = localparam->delRef();
         printf("delete link param %d HUB::%s %d\n", ret, __FUNCTION__, __LINE__);
     }
     return count;
 }
-/*
-int CHub::sendToAllPort(uint8_t *data, int len, void *param)
-{
-
-    void *ret = NULL;
-    int count = 0;
-    PORTSET::iterator iter = m_portSet.begin();
-    PORTSET::iterator end  = m_portSet.end();
-    for (; iter != end; ++iter)
-    {
-        LinkParam *localparam = (LinkParam *)*iter;
-        if (param != localparam)
-        {
-            localparam->addRef();
-            Interface *inter = localparam->interFace;
-            inter->writeData(data, len, 1, param, localparam);
-            localparam->delRef();
-            count++;
-        }
-    }
-    return count;
-}*/
-
 
 int CHub::sendToAllPort(uint8_t *data, int len, void *param)
 {
     void *ret = NULL;
     int count = 0;
     IDMAPPORT::iterator iter = m_idMap.begin();
-    IDMAPPORT::iterator end  = m_idMap.end();
+    IDMAPPORT::iterator end = m_idMap.end();
     IdMapPort *find = findIDPort(param);
-    if(find == NULL)
+    if (find == NULL)
     {
         return 0;
     }
 
     for (; iter != end; ++iter)
     {
-        LinkParam *localparam; 
+        LinkParam *localparam;
         IdMapPort *idmap = *iter;
         if (find != idmap)
         {
@@ -909,13 +902,13 @@ int CHub::sendArp(uint8_t *data, int len, void *param, NetInfo *netinfo)
 }
 
 int CHub::addIDPort(void *param)
-{    
+{
     LinkParam *localparam = (LinkParam *)param;
     m_tmpIdMap.m_id = localparam->id;
 
     IDMAPPORT::iterator it = m_idMap.find(&m_tmpIdMap);
-    IdMapPort *item = NULL; 
-    if(it == m_idMap.end())
+    IdMapPort *item = NULL;
+    if (it == m_idMap.end())
     {
         item = new IdMapPort;
         item->m_id = localparam->id;
@@ -923,7 +916,7 @@ int CHub::addIDPort(void *param)
         m_idMap.insert(item);
         printf("add id %d HUB::%s %d\n", m_tmpIdMap.m_id, __FUNCTION__, __LINE__);
     }
-    else    
+    else
     {
         item = *it;
         bool find = item->find(param);
@@ -931,17 +924,19 @@ int CHub::addIDPort(void *param)
         {
             item->addPort(param);
         }
-        printf("exist id %d HUB::%s %d\n", m_tmpIdMap.m_id, __FUNCTION__, __LINE__);
+        printf("exist id %d szie:%ld HUB::%s %d\n", m_tmpIdMap.m_id, item->m_size, __FUNCTION__, __LINE__);
     }
     return 0;
 }
+
 int CHub::rmIDPort(void *param)
 {
     LinkParam *localparam = (LinkParam *)param;
     m_tmpIdMap.m_id = localparam->id;
     IDMAPPORT::iterator it = m_idMap.find(&m_tmpIdMap);
     IdMapPort *item = NULL;
-    if(it != m_idMap.end())
+    int ret = 0;
+    if (it != m_idMap.end())
     {
         item = *it;
         bool find = item->find(param);
@@ -953,10 +948,11 @@ int CHub::rmIDPort(void *param)
                 m_idMap.erase(it);
                 delete item;
                 printf("clean id %d HUB::%s %d\n", m_tmpIdMap.m_id, __FUNCTION__, __LINE__);
+                ret = 1;
             }
         }
     }
-    return 0;
+    return ret;
 }
 
 IdMapPort *CHub::findIDPort(void *param)
@@ -978,10 +974,44 @@ void *CHub::getOneLikelyPort(void *param, std::size_t size)
     m_tmpIdMap.m_id = localparam->id;
     IDMAPPORT::iterator it = m_idMap.find(&m_tmpIdMap);
     IdMapPort *item = NULL;
-    if(it != m_idMap.end())
+    if (it != m_idMap.end())
     {
         item = *it;
-        return item->getItem(size);
+        return item->getFrist();
     }
-    return NULL;    
+    return NULL;
+}
+
+int CHub::cleanMac(void *param)
+{
+    if (m_macList.empty())
+    {
+        return 0;
+    }
+    MACMAPLISTITER iter = m_macList.begin();
+    mac_inter     *item = *iter;
+
+    if (g_curTime - item->lastTime > 1800)
+    {
+        IdMapPort *localparam = (IdMapPort *)(item->p);
+        if (NULL == localparam)
+        {
+            return 0;
+        }
+        MACMAPITER it = m_macMap.find(item);
+        uint8_t *mac = item->getMac();
+        if (it != m_macMap.end())
+        {
+            m_macMap.erase(it);
+            m_macList.erase(iter);
+            printf("clean mac %02X:%02X:%02X:%02X:%02X:%02X id:%d\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], localparam->m_id);
+            delete item;
+        }
+        else
+        {
+            printf("error clean mac %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        }
+        return 1;
+    }
+    return 0;
 }

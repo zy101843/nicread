@@ -45,7 +45,7 @@ void NicMgn::workThread()
     uint8_t *data;
     int len;
     m_linkParm.m_ext = m_mac;
-    m_hub->addData(NULL, -1, &m_linkParm);
+    m_hub->reg(-1, &m_linkParm);
     while (m_stop)
     {
         len = -1;

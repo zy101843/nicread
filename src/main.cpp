@@ -17,9 +17,10 @@
 #include "nat/nat.h"
 #include "route/route.h"
 #include "dhHand.h"
+#include "rsaProc.h"
 
-simple_encrypt *g_ecn;
-dhHand         *g_dh;
+// simple_encrypt *g_ecn;
+dhHand *g_dh;
 int writeFile(const char *fileName, const char *content, int length)
 {
     FILE *file = fopen(fileName, "w");
@@ -36,16 +37,21 @@ int checkAlreadyRun()
 {
     int fd;
     fd = open(LOCK_FILE, O_CREAT | O_RDWR, 0666);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         perror("can not open lock file");
         exit(EXIT_FAILURE);
     }
-    if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
-        if (errno == EWOULDBLOCK) {
+    if (flock(fd, LOCK_EX | LOCK_NB) == -1)
+    {
+        if (errno == EWOULDBLOCK)
+        {
             fprintf(stderr, "auth process in\n");
             close(fd);
             exit(EXIT_FAILURE);
-        } else {
+        }
+        else
+        {
             perror("add lock file error");
             close(fd);
             exit(EXIT_FAILURE);
@@ -54,9 +60,9 @@ int checkAlreadyRun()
     return 0;
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
-    int bakRun= 0;
+    int bakRun = 0;
     checkAlreadyRun();
     if (argc >= 2)
     {
@@ -64,15 +70,15 @@ int main(int argc, char* argv[])
         {
             daemon(1, 0);
             bakRun = 1;
-             bakRun = 1;
+            bakRun = 1;
             while (true)
             {
                 pid_t pChild = fork();
-                if (pChild ==0)
-                {             
+                if (pChild == 0)
+                {
                     break;
                 }
-                else 
+                else
                 {
                     int iLoc;
                     pChild = waitpid(pChild, &iLoc, 0);
@@ -81,7 +87,7 @@ int main(int argc, char* argv[])
             }
         }
     }
-    sleep(1);
+    OpenSSL_add_all_algorithms();
     dhHand::initAllParam();
     config *cfg = new config();
     bool readconfig = cfg->readConfig("./config.xml");
@@ -92,17 +98,14 @@ int main(int argc, char* argv[])
         return -1;
     }
     signal(SIGPIPE, SIG_IGN);
-    g_ecn = new simple_encrypt((uint8_t *)"liting", 6);
     CHub *hub = new CHub();
     midInterface *mid = hub;
-    
-    if(cfg->m_darpMac.size() > 0)
+
+    if (cfg->m_darpMac.size() > 0)
     {
         printf("mac %ld", cfg->m_darpMac.size());
         hub->setDropMac(&(cfg->m_darpMac));
     }
-
-  
 
     VNicMgn *virNic = NULL;
     NicMgn *nicMgn = NULL;
@@ -131,7 +134,7 @@ int main(int argc, char* argv[])
             nicMgn->start();
         }
     }
-    
+
     if (cfg->m_openRoute)
     {
         Route *route = new Route();
@@ -140,7 +143,7 @@ int main(int argc, char* argv[])
         route->start();
     }
 
-    if(cfg->m_opennat)
+    if (cfg->m_opennat)
     {
         Nat *nat = new Nat();
         nat->setHub(mid);
@@ -151,18 +154,18 @@ int main(int argc, char* argv[])
     netwokr->setRouteMessage(mid);
     if (cfg->m_sevice)
     {
-        std::set<ipPort*>::iterator iter = cfg->m_serviceips.begin(); 
-        std::set<ipPort*>::iterator end  = cfg->m_serviceips.end();
-        for(;iter != end ; iter++)
-        { 
+        std::set<ipPort *>::iterator iter = cfg->m_serviceips.begin();
+        std::set<ipPort *>::iterator end = cfg->m_serviceips.end();
+        for (; iter != end; iter++)
+        {
             ipPort *cli = *iter;
-            if(std::string::npos == cli->ip.find(':'))
+            if (std::string::npos == cli->ip.find(':'))
             {
-                netwokr->addListen(cli->ip.c_str(), cli->port);
+                netwokr->addListen(cli->ip.c_str(), cli->port, cli->keyPath);
             }
             else
             {
-                netwokr->addListenV6(cli->ip.c_str(), cli->port);
+                netwokr->addListenV6(cli->ip.c_str(), cli->port, cli->keyPath);
             }
         }
     }
@@ -170,20 +173,13 @@ int main(int argc, char* argv[])
     if (cfg->m_clinet)
     {
         std::set<ipPort *>::iterator iter = cfg->m_clients.begin();
-        std::set<ipPort *>::iterator end = cfg->m_clients.end();
+        std::set<ipPort *>::iterator end  = cfg->m_clients.end();
         for (; iter != end; iter++)
         {
             ipPort *cli = *iter;
-            for (int i = 0; i < cli->count ; i++)
+            for (int i = 0; i < cli->count; i++)
             {
-                if (std::string::npos == cli->ip.find(':'))
-                {
-                    netwokr->addConnect(cli->ip.c_str(), cli->port, 2, cli->bindport, hub, cli->mac, cli->id);
-                }
-                else
-                {
-                    netwokr->addConnectV6(cli->ip.c_str(), cli->port, 2, cli->bindport, hub, cli->mac, cli->id);
-                }
+                netwokr->addConnect(cli->ip, cli->port, 2, cli->bindport, hub, cli->mac, cli->id, cli->keyPath);
             }
         }
     }
@@ -192,6 +188,6 @@ int main(int argc, char* argv[])
     {
         sleep(10);
     }
-    delete cfg; 
+    delete cfg;
     return 0;
 }

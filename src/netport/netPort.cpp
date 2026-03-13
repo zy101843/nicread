@@ -1,19 +1,20 @@
 #include "netPort.h"
 #include "../hub/hub.h"
+#include "../rsaProc.h"
 
-
-extern simple_encrypt *g_ecn;
-extern dhHand         *g_dh;
+//extern simple_encrypt *g_ecn;
+extern dhHand *g_dh;
 #define BigLittleSwap16(A) ((((uint16_t)(A) & 0xff00) >> 8) | (((uint16_t)(A) & 0x00ff) << 8))
 
 CNetPort::CNetPort()
 {
-    m_ref.store(1); 
+    m_ref.store(1);
     m_type = 2;
     m_localBuf.buf = new uint8_t[64 * 1024];
     m_localBuf.buflen = 0;
     m_linkParm = new LinkParam();
-    m_linkParm->linkType = 2;
+    m_linkParm->linkType    = 2;
+    m_linkParm->linkSubType = 0;
     m_linkParm->interFace = this;
     m_deBuf = new uint8_t[64 * 1024];
     m_enBuf = new uint8_t[64 * 1024];
@@ -28,6 +29,8 @@ CNetPort::CNetPort()
     m_dhHand = NULL;
     m_recCount = 0;
     m_sedCount = 0;
+    m_keyInit = false;
+    m_outhKey = NULL;
 }
 
 int CNetPort::addRef()
@@ -52,9 +55,9 @@ void CNetPort::cleanPort(int type)
     if (type == 1)
     {
         int refPar = -1;
-        if (m_hub)
+        if (m_hub && m_linkParm->upReg)
         {
-            m_hub->addData(NULL, -2, m_linkParm);
+            m_hub->reg(-2, m_linkParm);
         }
         m_hub = NULL;
         refPar = m_linkParm->delRef();
@@ -77,19 +80,24 @@ CNetPort::~CNetPort()
     {
         EVP_CIPHER_CTX_free(m_ctxSed);
     }
-    if(NULL != m_dhHand)
+    if (NULL != m_dhHand)
     {
         delete m_dhHand;
         m_dhHand = NULL;
     }
+    if (m_outhKey)
+    {
+        delete[] m_outhKey;
+        m_outhKey = NULL;
+    }
 }
 
 int CNetPort::initkey()
-{ 
+{
     return 0;
 }
 
-int CNetPort::restInitkey(uint8_t *key, int len , int dir)
+int CNetPort::restInitkey(uint8_t *key, int len, int dir)
 {
     if (len < 32)
     {
@@ -107,41 +115,40 @@ int CNetPort::restInitkey(uint8_t *key, int len , int dir)
     m_ctxRes = EVP_CIPHER_CTX_new();
     m_ctxSed = EVP_CIPHER_CTX_new();
 
-    if(1 == dir)
+    if (1 == dir)
     {
         memcpy(m_sedkey, key, 16);
-        memcpy(m_sediv,  key+16, 16);
-        memcpy(m_reskey, key+32, 16);
-        memcpy(m_resiv,  key+48, 16);
+        memcpy(m_sediv, key + 16, 16);
+        memcpy(m_reskey, key + 32, 16);
+        memcpy(m_resiv, key + 48, 16);
     }
     else
     {
         memcpy(m_reskey, key, 16);
-        memcpy(m_resiv,  key+16, 16);
-        memcpy(m_sedkey, key+32, 16);
-        memcpy(m_sediv,  key+48, 16);
+        memcpy(m_resiv, key + 16, 16);
+        memcpy(m_sedkey, key + 32, 16);
+        memcpy(m_sediv, key + 48, 16);
     }
 
-    if (1 != EVP_DecryptInit_ex(m_ctxRes, EVP_aes_128_gcm(), NULL, NULL, NULL)) 
+    if (1 != EVP_DecryptInit_ex(m_ctxRes, EVP_aes_128_gcm(), NULL, NULL, NULL))
     {
         std::cerr << "init error" << std::endl;
         return -1;
     }
-    if (1 != EVP_EncryptInit_ex(m_ctxSed, EVP_aes_128_gcm(), NULL, NULL, NULL)) 
+    if (1 != EVP_EncryptInit_ex(m_ctxSed, EVP_aes_128_gcm(), NULL, NULL, NULL))
     {
         std::cerr << "init error" << std::endl;
         return -1;
     }
-
 
     EVP_CIPHER_CTX_ctrl(m_ctxRes, EVP_CTRL_GCM_SET_IVLEN, 16, NULL);
     EVP_EncryptInit_ex(m_ctxRes, NULL, NULL, m_reskey, m_resiv);
 
     EVP_CIPHER_CTX_ctrl(m_ctxSed, EVP_CTRL_GCM_SET_IVLEN, 16, NULL);
     EVP_EncryptInit_ex(m_ctxSed, NULL, NULL, m_sedkey, m_sediv);
+    m_keyInit = true;
     return 0;
 }
-
 
 int CNetPort::encryptAes(unsigned char *plaintext, int plaintext_len, unsigned char *ciphertext, uint16_t id)
 {
@@ -149,8 +156,7 @@ int CNetPort::encryptAes(unsigned char *plaintext, int plaintext_len, unsigned c
     int ciphertext_len = 0;
     (void)id;
 
-
-    *(uint32_t*)(m_sediv+12) = m_sedCount;
+    *(uint32_t *)(m_sediv + 12) = m_sedCount;
     m_sedCount++;
 
     if (1 != EVP_EncryptInit_ex(m_ctxSed, NULL, NULL, NULL, m_sediv))
@@ -170,7 +176,7 @@ int CNetPort::encryptAes(unsigned char *plaintext, int plaintext_len, unsigned c
         return -1;
     }
     ciphertext_len += len;
-    if(1 != EVP_CIPHER_CTX_ctrl(m_ctxSed, EVP_CTRL_GCM_GET_TAG, 8, ciphertext))
+    if (1 != EVP_CIPHER_CTX_ctrl(m_ctxSed, EVP_CTRL_GCM_GET_TAG, 8, ciphertext))
     {
         return -1;
     }
@@ -182,14 +188,14 @@ int CNetPort::decryptAes(unsigned char *ciphertext, int ciphertext_len, unsigned
     int len = 0;
     int plaintext_len = 0;
 
-    *(uint32_t*)(m_resiv+12) = m_recCount;
+    *(uint32_t *)(m_resiv + 12) = m_recCount;
     m_recCount++;
     if (1 != EVP_DecryptInit_ex(m_ctxRes, NULL, NULL, NULL, m_resiv))
     {
         std::cerr << "init error" << std::endl;
         return -1;
     }
-    if (1 != EVP_DecryptUpdate(m_ctxRes, plaintext, &len, ciphertext + 8, ciphertext_len-8))
+    if (1 != EVP_DecryptUpdate(m_ctxRes, plaintext, &len, ciphertext + 8, ciphertext_len - 8))
     {
         return -1;
     }
@@ -208,7 +214,6 @@ int CNetPort::decryptAes(unsigned char *ciphertext, int ciphertext_len, unsigned
     plaintext_len += len;
     return plaintext_len;
 }
-
 
 int CNetPort::writeData(uint8_t *data, int len, int type, void *srcparam, void *dstParam)
 {
@@ -239,7 +244,7 @@ int CNetPort::localwriteData(uint8_t *data, int len)
 int CNetPort::HandData(uint8_t *data, int len, void *dstParam)
 {
     int ret = 0;
-    unsigned int  locallen = len + 4;
+    unsigned int locallen = len + 4;
     LinkParam *param = (LinkParam *)dstParam;
     uint8_t local[9];
     uint8_t *post = local;
@@ -258,7 +263,7 @@ int CNetPort::HandData(uint8_t *data, int len, void *dstParam)
     return ret;
 }
 
-char g_frist_flag[] = "01234567899876543210abcdefghhgfedcba";
+
 int32_t CNetPort::processFromNet(uint8_t *data, int len)
 {
     if (len <= 0)
@@ -391,6 +396,11 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
             if (m_linkType == 2)
             {
                 ret = processDataClint(prcoessData, partSSLlen);
+                if(ret == -1)
+                {
+                    return 0;
+                }
+
             }
             else if (m_linkType == 1)
             {
@@ -404,6 +414,10 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
         }
         else
         {
+            if (false == m_keyInit)
+            {
+                return 0;
+            }
             deslen = decryptAes(prcoessData + 5, partSSLlen - 5, m_deBuf);
             if (deslen <= 0)
             {
@@ -411,20 +425,32 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
             }
             if (m_linkType == 1)
             {
-                if (deslen == 44 && 0 == memcmp(m_deBuf + 8, g_frist_flag, 36))
+                int frsitlen = 0;
+                uint8_t *fristdata = NULL;
+                const  char *localPath = "private_key.pem";
+                if(m_keyPath.empty() == false)
                 {
-                    printf("first random id is 0 g_frist_flag data\n");
-                    m_id = *((uint32_t *)(m_deBuf+4));  
+                    localPath = m_keyPath.c_str();
+                }  
+                     
+                if (0 == keyDec(localPath, m_deBuf + 4, deslen - 4, &fristdata, &frsitlen))
+                {
+                    if (frsitlen != 32 && 0 != memcmp(fristdata, m_localHash, 32))
+                    {
+                        free(fristdata);
+                        return 0;
+                    }
+                    free(fristdata);
+                    m_id = *((uint32_t *)(m_deBuf));
                     m_linkParm->id = m_id;
-
-                    printf("set link id to %u\n", m_id); 
-                    uint8_t first_flag[44];
-                    mkFristPacket(first_flag);
-                    localwriteData((uint8_t *)first_flag, 44);
+                    printf("first pub key check is good id: %d \n" ,m_id);
+                    uint8_t *first_flag = NULL;
+                    int send = mkFristPacketServer(&first_flag);
+                    localwriteData(first_flag, send);
+                    delete[] first_flag;
                     m_linkParm->setLink(true);
                     registerToHub();
                     m_recvCount = 1;
-                    return 40;
                 }
                 else
                 {
@@ -433,16 +459,29 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
             }
             else
             {
-                if (deslen == 44 && 0 == memcmp(m_deBuf + 8, g_frist_flag, 36))
+                if (deslen == 32 && 0 == memcmp(m_deBuf, m_localHash, 32))
                 {
-                    printf("servier random id is 0 g_frist_flag data\n");
+                    printf("servier hash is good \n");
                     m_linkParm->setLink(true);
                     registerToHub();
                     m_recvCount = 1;
-                    return 40;
                 }
                 else
                 {
+                    printf("servier hash is not good %d\n", deslen);
+                    printf("m_deBuf key is:");
+                    for (int i = 0; i < 16; i++)
+                    {
+                        printf("%02x ", m_deBuf[i]);
+                    }
+                    printf("\n");
+
+                    printf("m_localHash key is:");
+                    for (int i = 0; i < 16; i++)
+                    {
+                        printf("%02x ", m_localHash[i]);
+                    }
+                    printf("\n");
                     return 0;
                 }
             }
@@ -450,12 +489,15 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
     }
     else
     {
-        deslen = decryptAes(prcoessData + 5, partSSLlen - 5, m_deBuf);
+        HubMidBuf *midbuf = m_hub->getMidBuf();
+        deslen = decryptAes(prcoessData + 5, partSSLlen - 5, midbuf->buf);
         if (deslen <= 0)
         {
+            m_hub->returnMidBuf(midbuf);
             return 0;
         }
-        ret = writetoHub(m_deBuf, deslen);
+        midbuf->len = deslen;
+        ret = m_hub->addData(midbuf, m_linkParm);
     }
     m_recvCount++;
     if (NULL != curPost)
@@ -488,12 +530,17 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
 
             if (remainLen >= partLen)
             {
-                deslen = decryptAes(curPost + 5, partLen - 5, m_deBuf);
+
+                HubMidBuf *midbuf = m_hub->getMidBuf();
+                deslen = decryptAes(curPost + 5, partLen - 5, midbuf->buf);
                 if (deslen <= 0)
                 {
+                    m_hub->returnMidBuf(midbuf);
                     return 0;
                 }
-                ret = writetoHub(m_deBuf, deslen);
+                midbuf->len = deslen;
+                ret = m_hub->addData(midbuf, m_linkParm);
+                //ret = writetoHub(m_deBuf, deslen);
                 m_recvCount++;
                 curPost   += partLen;
                 remainLen -= partLen;
@@ -506,7 +553,7 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
             }
         }
     }
-    if(0 == m_recvCount)
+    if (0 == m_recvCount)
     {
         m_recvCount = 1;
     }
@@ -516,11 +563,12 @@ int32_t CNetPort::processFromNet(uint8_t *data, int len)
 int32_t CNetPort::regtoUp(void *mgr, int type)
 {
     m_linkType = type;
-    if (type == 2) 
+    if (type == 2)
     {
         m_dhHand = new dhHand();
         int pkeln = 0;
         unsigned char *pk = m_dhHand->getPublic(pkeln);
+        memcpy(m_localHash, m_dhHand->m_hash, 32);
         printf("pub key is:");
         for (int i = 0; i < pkeln && i < 16; i++)
         {
@@ -535,63 +583,91 @@ int32_t CNetPort::regtoUp(void *mgr, int type)
 
 void CNetPort::set(void *mgr, void *peer)
 {
-    m_linkParm->linkMgr   = (CNetworkMgr *)mgr;
-    m_linkParm->link      = (CLinkPeer *)peer;
-    addRef();   
+    m_linkParm->linkMgr = (CNetworkMgr *)mgr;
+    m_linkParm->link    = (CLinkPeer *)peer;
+    addRef();
     m_linkParm->interFace = this;
 }
 
- int CNetPort::registerToHub()
- {
-     m_linkParm->addRef();
-     int ret = m_hub->addData(NULL, -1, m_linkParm);
-     return ret;
- }
+void CNetPort::setKeyPath(std::string &path)
+{
+    m_keyPath = path;
+}
 
- int CNetPort::writetoHub(uint8_t *data, int len)
- {
-        int ret = m_hub->addData(data, len, m_linkParm);
-        return ret;
- }
 
- int CNetPort::processData(uint8_t *data, int len)
- {
-     int ret = 0;
-     int secret_len;
-     if (m_linkType != 2)
-     {
-         m_dhHand = new dhHand();
-     }
-     int pkeln = 0;
-     unsigned char *pk = m_dhHand->getPublic(pkeln);
-     printf("service puk is :");
-     for (int i = 0; i < pkeln && i < 16; i++)
-     {
-         printf("%02x ", pk[i]);
-     }
-     printf("\n");
-     unsigned char *secret = m_dhHand->getShare(data + 9, len - 9, secret_len);
-     printf("service key is :");
-     for (int i = 0; i < secret_len && i < 16; i++)
-     {
-         printf("%02x ", secret[i]);
-     }
-     printf("\n");
-     restInitkey(secret, secret_len, 1);
-     free(secret);
-     HandData(pk, pkeln, m_linkParm);
-     delete m_dhHand;
-     m_dhHand = NULL;
-     return len;
- }
+int CNetPort::registerToHub()
+{
+    m_linkParm->addRef();
+    m_linkParm->upReg = true;
+    int ret = m_hub->reg(-1, m_linkParm);
+    return ret;
+}
+
+int CNetPort::writetoHub(uint8_t *data, int len)
+{
+    int ret = m_hub->addData(data, len, m_linkParm);
+    return ret;
+}
+
+int CNetPort::processData(uint8_t *data, int len)
+{
+    int ret = 0;
+    int secret_len;
+    if (m_linkType != 2)
+    {
+        m_dhHand = new dhHand();
+    }
+    int pkeln = 0;
+
+    unsigned char *pk = m_dhHand->getPublic(pkeln);
+    memcpy(m_localHash, m_dhHand->m_hash, 32);
+
+    printf("service puk is :");
+    for (int i = 0; i < pkeln && i < 16; i++)
+    {
+        printf("%02x ", pk[i]);
+    }
+
+    printf("\n");
+
+    m_outhKey = new uint8_t[len - 9];
+    memcpy(m_outhKey, data + 9, len - 9);
+    m_outhKeylen = len - 9;
+
+    printf("clien puk is :");
+    for (int i = 0; i < 16; i++)
+    {
+        printf("%02x ", m_outhKey[i]);
+    }
+    printf("\n");
+
+    unsigned char *secret = m_dhHand->getShare(data + 9, len - 9, secret_len);
+    printf("service key is :");
+    for (int i = 0; i < secret_len && i < 16; i++)
+    {
+        printf("%02x ", secret[i]);
+    }
+    printf("\n");
+    restInitkey(secret, secret_len, 1);
+    free(secret);
+    HandData(pk, pkeln, m_linkParm);
+    delete m_dhHand;
+    m_dhHand = NULL;
+    return len;
+}
 
 int CNetPort::processDataClint(uint8_t *data, int len)
 {
     int ret = 0;
     int secret_len;
     unsigned char *secret = m_dhHand->getShare(data + 9, len - 9, secret_len);
-    delete  m_dhHand;
-    m_dhHand  = NULL;
+    delete m_dhHand;
+
+    m_outhKey = new uint8_t[len - 9];
+    memcpy(m_outhKey, data + 9, len - 9);
+    m_outhKeylen = len - 9;
+
+    m_dhHand = NULL;
     printf("client key is:");
     for (int i = 0; i < secret_len && i < 16; i++)
     {
@@ -600,9 +676,15 @@ int CNetPort::processDataClint(uint8_t *data, int len)
     printf("\n");
     restInitkey(secret, secret_len, 2);
     free(secret);
-    uint8_t first_flag[44];
-    mkFristPacket(first_flag);
-    localwriteData((uint8_t *)first_flag, 44);
+    uint8_t *first_flag = NULL;
+    int fristlen = mkFristPacketClien(&first_flag);
+    if (-1 == fristlen)
+    {
+        return -1;
+    }
+    localwriteData(first_flag, fristlen);
+    delete[] first_flag;
+
     printf("clinet send frist packet\n");
     if (m_linkParm->link->m_mac[0] != 0)
     {
@@ -615,11 +697,40 @@ int CNetPort::processDataClint(uint8_t *data, int len)
     return len;
 }
 
-int CNetPort::mkFristPacket(uint8_t *data)
+int CNetPort::mkFristPacketClien(uint8_t **data)
 {
-    srand(time(NULL));
-    *(int *)(data) = rand();
-    *(uint32_t *)(data+4) = m_id;
-    memcpy(data + 8, g_frist_flag, 36);
-    return 44;
+    int sendlen = 0;
+    unsigned char *hash = new unsigned char[32];
+    uint8_t *end =0;
+    m_dhHand->sha256(hash, m_outhKey, m_outhKeylen);
+
+
+    const char *localPath = "public_key.pem";
+    if (m_keyPath.empty() == false)
+    {
+        localPath = m_keyPath.c_str();
+    }
+    int pe = publicEnc(localPath, hash, 32, &end, &sendlen);
+    if(pe == -1)
+    {
+        return -1;
+    }
+    delete []hash;
+
+    uint8_t *localdata = new uint8_t[sendlen + 4];
+    memcpy(localdata + 4, end, sendlen);
+    *(uint32_t *)(localdata) = m_id;
+    *data = localdata;
+    sendlen += 4;
+    free(end);
+
+    return sendlen;
+}
+
+int CNetPort::mkFristPacketServer(uint8_t **data)
+{
+    uint8_t *hash = new uint8_t[32];
+    *data = hash;
+    m_dhHand->sha256(hash, m_outhKey, m_outhKeylen);
+    return 32;
 }

@@ -58,28 +58,8 @@ int simple_encrypt::initkey(uint8_t *key, int key_length)
 {
 
     OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS | OPENSSL_INIT_ADD_ALL_CIPHERS, NULL);
-    //m_dh_params = get_ffdhe_params();
     generate_key(key, key_length, m_key, 16);
-    //test3();
-    /*
-    m_ctxRes = EVP_CIPHER_CTX_new();
-    m_ctxSed = EVP_CIPHER_CTX_new();
-    memcpy(m_reskey, m_key, 16);
-    memcpy(m_resiv, m_key, 16);
-    memcpy(m_sedkey, m_key, 16);
-    memcpy(m_sediv, m_key, 16);
- 
-    m_ctxRes = EVP_CIPHER_CTX_new();
-    m_ctxSed = EVP_CIPHER_CTX_new();
-    if (1 != EVP_DecryptInit_ex(m_ctxRes, EVP_aes_128_cbc(), NULL, m_reskey, m_resiv)) {
-        std::cerr << "init error" << std::endl;
-        return -1;
-    }
-    if (1 != EVP_EncryptInit_ex(m_ctxSed, EVP_aes_128_cbc(), NULL, m_sedkey, m_sediv)) {
-        std::cerr << "init error" << std::endl;
-        return -1;
-    }
-    */
+   
     return 0;
 }
 uint8_t *simple_encrypt::getaeskey()

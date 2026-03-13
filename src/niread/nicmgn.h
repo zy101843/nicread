@@ -17,7 +17,7 @@ struct SendBufItem{
 class NicMgn :public Interface
 {
 public:
-    NicMgn();
+   NicMgn();
    virtual ~NicMgn();
 public:
     virtual int writeData(uint8_t *data, int len, int type, void *srcparam, void *dstParam);

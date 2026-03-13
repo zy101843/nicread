@@ -27,6 +27,7 @@ public:
     int32_t regtoUp(void *mgr, int type);
 public:
     void set(void *mgr, void *peer);
+    void setKeyPath(std::string &path);
 public:
     virtual void cleanPort(int type);
 public:
@@ -44,7 +45,8 @@ private:
     int registerToHub();
     int writetoHub(uint8_t *data, int len);
     int localwriteData(uint8_t *data, int len);
-    int mkFristPacket(uint8_t *data);
+    int mkFristPacketClien(uint8_t **data);
+    int mkFristPacketServer(uint8_t **data);
 private:
     LinkParam   *m_linkParm;
     loaclbuf    m_localBuf;
@@ -52,6 +54,7 @@ private:
     uint8_t     *m_enBuf;
     uint16_t     m_count;
     uint32_t     m_recvCount;
+    bool         m_keyInit;
 
     EVP_CIPHER_CTX   *m_ctxRes;
     EVP_CIPHER_CTX   *m_ctxSed;
@@ -65,5 +68,9 @@ private:
     dhHand            *m_dhHand;
     uint32_t          m_recCount;
     uint32_t          m_sedCount;
+    uint8_t           *m_outhKey;
+    int               m_outhKeylen;
+    uint8_t           m_localHash[32];
+    std::string       m_keyPath;
 };
 

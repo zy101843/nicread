@@ -130,25 +130,22 @@ dhHand::~dhHand()
 #ifndef SSL_MY_3
 unsigned char *dhHand::getPublic(int &pkLen)
 {
-    // OpenSSL_add_all_algorithms();
-    m_dh = DH_new();
-    //m_p  = BN_bin2bn(ffdhe2048_p, sizeof(ffdhe2048_p), NULL);
-    //m_g  = BN_bin2bn(ffdhe2048_g, sizeof(ffdhe2048_g), NULL);
-
-    DH_set0_pqg(m_dh, BN_dup(m_p), NULL, BN_dup(m_g));
-
-    if (!DH_generate_key(m_dh) )
+    if (NULL == m_public)
     {
-        ERR_print_errors_fp(stderr);
-        return NULL;
+        m_dh = DH_new();
+        DH_set0_pqg(m_dh, BN_dup(m_p), NULL, BN_dup(m_g));
+        if (!DH_generate_key(m_dh))
+        {
+            ERR_print_errors_fp(stderr);
+            return NULL;
+        }
+        const BIGNUM *pubA;
+        DH_get0_key(m_dh, &pubA, NULL);
+        m_pubenLen = BN_num_bytes(pubA);
+        m_public = (unsigned char *)malloc(m_pubenLen);
+        BN_bn2bin(pubA, m_public);
+        sha256(m_hash, m_public, m_pubenLen);
     }
-
-    const BIGNUM *pubA;
-    DH_get0_key(m_dh, &pubA, NULL);
-    m_pubenLen = BN_num_bytes(pubA);
-
-    m_public = (unsigned char *)malloc(m_pubenLen);
-    BN_bn2bin(pubA, m_public);
     pkLen = m_pubenLen;
     return m_public;
 }
@@ -284,8 +281,10 @@ unsigned char * dhHand::getPublic(int &pkLen)
     EVP_PKEY_keygen(keygen_ctx, &m_key);
     EVP_PKEY_CTX_free(keygen_ctx);
 
-    m_public= get_dh_pubkey(m_key, &m_pubenLen);
+    m_public = get_dh_pubkey(m_key, &m_pubenLen);
     pkLen = m_pubenLen;
+    sha256(m_hash, m_public, m_pubenLen);
+
     return m_public;
 }
 
@@ -316,4 +315,14 @@ void dhHand::initAllParam()
     m_p = BN_bin2bn(ffdhe2048_p, sizeof(ffdhe2048_p), NULL);
     m_g = BN_bin2bn(ffdhe2048_g, sizeof(ffdhe2048_g), NULL);
 #endif
+}
+
+int dhHand::sha256(unsigned char *out, uint8_t *in, int inlen)
+{
+    EVP_MD_CTX *ctxHash = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctxHash, EVP_sha256(), NULL);
+    EVP_DigestUpdate(ctxHash, in, inlen);
+    EVP_DigestFinal_ex(ctxHash, out, NULL);
+    EVP_MD_CTX_free(ctxHash);
+    return 32;
 }

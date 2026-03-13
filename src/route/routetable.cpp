@@ -8,7 +8,15 @@ routetable::routetable(/* args */)
 
 routetable::~routetable()
 {
-
+}
+int routetable::setDefaultMac(const char *mac, const char *lacolmac)
+{
+    memcpy(m_defaultMac, mac, 6);
+    memcpy(m_Notfind,    mac, 6);
+    memcpy(m_Notfind+6, lacolmac, 6);
+     printf("default %hhx:%hhx:%hhx:%hhx:%hhx:%hhx  %hhx:%hhx:%hhx:%hhx:%hhx:%hhx\n", m_Notfind[0], m_Notfind[1], m_Notfind[2], m_Notfind[3], m_Notfind[4], m_Notfind[5],
+        m_Notfind[6], m_Notfind[7], m_Notfind[8], m_Notfind[9], m_Notfind[10], m_Notfind[11]);
+    return 0;
 }
 
 std::size_t removeData(std::string &str)
@@ -17,17 +25,16 @@ std::size_t removeData(std::string &str)
     std::string result;
     const char *p = str.c_str();
     const char *end = p + len;
-    for (; p!=end; p++)
+    for (; p != end; p++)
     {
-       if((*p>='0' && *p<='9') || (*p>='a' && *p<='z') || (*p>='A' && *p<='Z') || (*p=='.' || *p=='/'))
-       {
-           result += *p;
-       }
-    }   
+        if ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p == '.' || *p == '/'))
+        {
+            result += *p;
+        }
+    }
     str = result;
     return result.length();
 }
-
 
 int routetable::addRoute(std::string path, const char *mac)
 {
@@ -39,6 +46,7 @@ int routetable::addRoute(std::string path, const char *mac)
         return -1;
     }
     TrieTree *tree = new TrieTree();
+    tree->m_path = path;
     int prefixlen = 0;
     std::string line;
     int count = 0;
@@ -67,13 +75,13 @@ int routetable::addRoute(std::string path, const char *mac)
         uint32_t  locaIp = ntohl(ip);
         TrieNode *find   = tree->search(locaIp, prefixlen);
        
-        if (find != nullptr && prefixlen >= len)
+        if (find != nullptr && prefixlen <= len)
         {
             printf("have find %s\n", line.c_str());
             continue;
         }
         char *findmac = findRoute(ip);
-        if (findmac != NULL)
+        if (findmac != m_Notfind)
         {
             printf("have find same mac %s  %d %s\n", path.c_str(), count,  line.c_str());
             continue;
@@ -87,6 +95,7 @@ int routetable::addRoute(std::string path, const char *mac)
     printf("%s  user %d \n", path.c_str(), tree->m_user);
     return 0;
 }
+
 char *routetable::findRoute(uint32_t ip)
 {
     ROUTEITER iter = m_routeTable.begin();
@@ -94,7 +103,7 @@ char *routetable::findRoute(uint32_t ip)
     for (; iter != m_end; iter++)
     {
         TrieTree *node = *iter;
-        TrieNode *ret = node->search(ip, prefixlen);
+        TrieNode *ret  = node->search(ip, prefixlen);
         if (ret != nullptr)
         {
             if (prefixlen < 32 || (prefixlen == 32 && ip == ret->ip))
@@ -102,11 +111,11 @@ char *routetable::findRoute(uint32_t ip)
                 int gw = ret->gwip;
                 if (gw < 0 || gw >= (int)m_macTable.size())
                 {
-                    return nullptr;
+                    return m_Notfind;
                 }
                 return m_macTable[gw];
             }
         }
     }
-    return NULL;
+    return m_Notfind;
 }

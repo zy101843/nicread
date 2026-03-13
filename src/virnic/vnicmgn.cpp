@@ -13,7 +13,7 @@ VNicMgn::VNicMgn()
     m_linkParm.interFace   = this;
     m_linkParm.linkType    = 1;
     m_linkParm.linkSubType = 2;
-    m_linkParm.id           = 2;
+    m_linkParm.id          = 2;
 }
 
 VNicMgn::~VNicMgn()
@@ -76,7 +76,7 @@ void VNicMgn::workThread()
     uint8_t *data;
     int len;
     m_linkParm.m_ext = g_map;
-    m_hub->addData(NULL, -1, &m_linkParm);
+    m_hub->reg(-1, &m_linkParm);
     int count = 0;
     while (m_stop)
     {

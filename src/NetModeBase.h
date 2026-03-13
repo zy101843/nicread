@@ -30,6 +30,7 @@ struct LinkParam
     int         linkType;
     int         linkSubType;
     int         id;
+    bool        upReg;
     void        *m_ext;
     LinkParam()
     {
@@ -42,6 +43,7 @@ struct LinkParam
         memset(leve, 0, sizeof(leve));
         interFace = NULL;
         m_ext  = NULL;
+        upReg  = false;
         setLink(false);
     }
     int  addRef();

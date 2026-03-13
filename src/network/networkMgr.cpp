@@ -9,7 +9,7 @@
 #include "../tcpiphead.h"
 //#include "log.h"
 
-
+ std::time_t g_curTime = 0;
 
 unsigned char arp_data[] = 
 {
@@ -34,6 +34,7 @@ CNetworkMgr::CNetworkMgr()//: m_ByteStrem(1000, 64*1024)
     m_callBack = NULL;
     m_links    = 0;
     m_BufMgn   = ByteBufMgn::getByteBufMgn(); 
+    g_curTime  = time(NULL);
 }
 
 CNetworkMgr::~CNetworkMgr()
@@ -74,7 +75,7 @@ void CNetworkMgr::setRouteMessage(void *route)
     m_distri = route;
 }
 
-void *CNetworkMgr::addListen(const char *ip, uint16_t port)
+void *CNetworkMgr::addListen(const char *ip, uint16_t port, std::string &path)
 {
     int  listenfd;
     struct sockaddr_in servaddr;
@@ -108,12 +109,13 @@ void *CNetworkMgr::addListen(const char *ip, uint16_t port)
     peer->m_peerTyep    = PEERTYPE_LINST;
     peer->m_ipaddr.ipv4 = servaddr.sin_addr.s_addr;
     peer->m_isV6        = false;
+    peer->m_keyPath     = path; 
     m_listenfd.insert(listenfd);
 
     return peer;
 }
 
-void *CNetworkMgr::addListenV6(const char *ip, uint16_t port)
+void *CNetworkMgr::addListenV6(const char *ip, uint16_t port, std::string &path)
 {
     int listenfd = socket(AF_INET6, SOCK_STREAM, 0);
     struct sockaddr_in6 addr;
@@ -155,6 +157,7 @@ void *CNetworkMgr::addListenV6(const char *ip, uint16_t port)
     m_epoll.addEnv(flag, listenfd, peer);
     peer->m_peerTyep    = PEERTYPE_LINST;
     peer->m_isV6        = true;
+    peer->m_keyPath     = path;
     memcpy(peer->m_ipaddr.ipv6, addr.sin6_addr.s6_addr, sizeof(peer->m_ipaddr.ipv6));
 
     m_listenfd.insert(listenfd);
@@ -165,23 +168,33 @@ void *CNetworkMgr::addConnect(ADDNETPort *item)
 {
     if (item->isV6)
     {
-        return addConnectV6(item->ip.ipv6, item->port, item->type, item->bindport, item->dist, item->mac ,item->id);
+        return addConnectV6(item->ip.ipv6, item->port, item->type, item->bindport, item->dist, item->mac ,item->id, item->keyPath);
     }
     else
     {
-        return addConnect(item->ip.ipv4, item->port, item->type, item->bindport, item->dist, item->mac, item->id);
+        return addConnect(item->ip.ipv4, item->port, item->type, item->bindport, item->dist, item->mac, item->id, item->keyPath);
     }
 }
 
-void *CNetworkMgr::addConnect(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id)
+void *CNetworkMgr::addConnect(std::string &ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id, std::string &path)
 {
-    uint32_t addr  = inet_addr(ip);
-    uint16_t nport = htons(port);
-    return addConnect(addr,  nport, type, htons(bindport), dist, mac, id);
+    if (std::string::npos == ip.find(':'))
+    {
+        uint32_t addr = inet_addr(ip.c_str());
+        uint16_t nport = htons(port);
+        return addConnect(addr, nport, type, htons(bindport), dist, mac, id, path);
+    }
+    else
+    {
+
+        struct in6_addr in6addr;
+        inet_pton(AF_INET6, ip.c_str(), &in6addr);
+        uint16_t nport = htons(port);
+        return addConnectV6(in6addr.s6_addr32, nport, type, htons(bindport), dist, mac, id, path);
+    }
 }
 
-   
-void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id)
+void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id, std::string &path)
 {
     struct sockaddr_in servaddr;
     int sock_cli        = socket(AF_INET, SOCK_STREAM, 0);
@@ -233,6 +246,7 @@ void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, uint16_t bin
     peer->m_proto       = type;
     peer->m_id          = id;   
     memcpy(peer->m_mac, mac, sizeof(peer->m_mac));
+    peer->m_keyPath     = path;
     peer->setMessageRoute(dist);
     peer->addRef();
 
@@ -257,15 +271,7 @@ void *CNetworkMgr::addConnect(uint32_t ip, uint16_t port, int type, uint16_t bin
     return peer;
 }
 
-void *CNetworkMgr::addConnectV6(const char *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac, uint32_t id)
- {
-    struct in6_addr in6addr;
-    inet_pton(AF_INET6, ip, &in6addr);
-    uint16_t nport = htons(port);
-    return addConnectV6(in6addr.s6_addr32, nport, type, htons(bindport), dist, mac, id);
- }
-
- void *CNetworkMgr::addConnectV6(uint32_t *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac,  uint32_t id)
+void *CNetworkMgr::addConnectV6(uint32_t *ip, uint16_t port, int type, uint16_t bindport, void *dist, uint8_t *mac,  uint32_t id, std::string &path)
 {
     struct sockaddr_in6 servaddr;
     int sock_cli        = socket(AF_INET6, SOCK_STREAM, 0);
@@ -300,16 +306,14 @@ void *CNetworkMgr::addConnectV6(const char *ip, uint16_t port, int type, uint16_
         }
     }
 
-    int syncnt = 3;
-    setsockopt(sock_cli, IPPROTO_TCP, TCP_SYNCNT, &syncnt, sizeof(syncnt));
-    connect(sock_cli, (struct sockaddr *) & servaddr, sizeof(servaddr));
+   
  
     CLinkPeer *peer = new CLinkPeer();
     peer->setBufMgn(m_BufMgn);
     peer->setMessageRoute(m_distri);
     m_links++;
 
-    uint32_t  flag      = EPOLLOUT | EPOLLRDHUP;
+    uint32_t  flag      = EPOLLOUT | EPOLLRDHUP|EPOLLERR;
     peer->m_linkType    = IP_TCP_TYPE;
     peer->m_fd          = sock_cli;
     peer->m_step        = PEERSTEP::PEERSTEP_CONECT;
@@ -319,11 +323,25 @@ void *CNetworkMgr::addConnectV6(const char *ip, uint16_t port, int type, uint16_
     peer->m_port        = port;
     peer->m_bindport    = bindport;
     peer->m_proto       = type;
-    peer->m_linkType    = 2;
     peer->m_id          = id;
     memcpy(peer->m_mac, mac, sizeof(peer->m_mac));
+     peer->m_keyPath     = path;
     peer->setMessageRoute(dist);
     peer->addRef();
+
+    int syncnt = 3;
+    setsockopt(sock_cli, IPPROTO_TCP, TCP_SYNCNT, &syncnt, sizeof(syncnt));
+     int ret = connect(sock_cli, (struct sockaddr *)&servaddr, sizeof(servaddr));
+    if (ret == 0)
+    {
+        printf("connect immediately success\n");
+    }
+    else if (ret < 0 && errno != EINPROGRESS)
+    {
+        perror("connect");
+        handEPOLLRDHUP(peer);
+        return peer;
+    }
 
     m_CriticalEpoll.lock();
     m_epoll.addEnv(flag, sock_cli, peer);
@@ -559,7 +577,6 @@ void CNetworkMgr::TimeOutThread()
             udpClinetList.clear();
             countclint = 0;
         }
-
         sleep(5);
     }
 }
@@ -604,7 +621,11 @@ void CNetworkMgr::MonitorThread()
                 }
 
             }
-            if (EPOLLIN == (env[i].events & EPOLLIN))
+            if (EPOLLRDHUP == (env[i].events & EPOLLRDHUP))
+            {
+                handEPOLLRDHUP(fdper);
+            }
+            else if (EPOLLIN == (env[i].events & EPOLLIN))
             {
                 if (PEERTYPE_LINST == fdper->m_peerTyep)
                 {
@@ -635,11 +656,7 @@ void CNetworkMgr::MonitorThread()
                     readUdpClinet(fdper);
                 }
             }
-            if (EPOLLRDHUP == (env[i].events & EPOLLRDHUP))
-            {
-                handEPOLLRDHUP(fdper);
-                continue;
-            }
+           
         }
     }
 }
@@ -724,6 +741,7 @@ int  CNetworkMgr::handAccep(CLinkPeer * linkPeer)
     peer->setConnect(true);
     peer->m_proto       = linkPeer->m_proto;
     peer->m_linkType    = IP_TCP_TYPE;
+    peer->m_keyPath     = linkPeer->m_keyPath;
     peer->addRef();  
 
     upTimeLink(peer);
@@ -736,31 +754,69 @@ int  CNetworkMgr::handAccep(CLinkPeer * linkPeer)
 int CNetworkMgr::handConnect(CLinkPeer *linkPeer)
 {
 
-    struct sockaddr_in peer;
-    struct sockaddr_in local;
-    socklen_t len = sizeof(peer);
-
-    if (getsockname(linkPeer->m_fd, (struct sockaddr *)&local, &len) == 0)
+    if (linkPeer->m_isV6)
     {
+         struct sockaddr_in6 peer;
+         struct sockaddr_in6 local;
+         socklen_t len = sizeof(peer);
 
-        printf("socket local is connected to %s:%d\n", inet_ntoa(local.sin_addr), ntohs(local.sin_port));
+         if (getsockname(linkPeer->m_fd, (struct sockaddr *)&local, &len) == 0)
+         {
+             char ip[INET6_ADDRSTRLEN];
+             inet_ntop(AF_INET6, &local.sin6_addr, ip, sizeof(ip));
+             printf("socket local is connected to %s:%d\n", ip, ntohs(local.sin6_port));
+         }
+        else
+        {
+            printf("not connected yet: %s\n", strerror(errno));
+            return handEPOLLRDHUP(linkPeer);
+        }
+
+        len = sizeof(peer);
+        if (getpeername(linkPeer->m_fd, (struct sockaddr *)&peer, &len) == 0)
+        {
+            char ip[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &peer.sin6_addr, ip, sizeof(ip));
+            printf("socket is connected to %s:%d\n", ip, ntohs(peer.sin6_port));
+        }
+        else
+        {
+            printf("not connected yet: %s\n", strerror(errno));
+            return handEPOLLRDHUP(linkPeer);
+        }
     }
     else
     {
-        printf("not connected yet: %s\n", strerror(errno));
-        return handEPOLLRDHUP(linkPeer);
+
+        struct sockaddr_in peer;
+        struct sockaddr_in local;
+        socklen_t len = sizeof(peer);
+        if (getsockname(linkPeer->m_fd, (struct sockaddr *)&local, &len) == 0)
+        {
+            char ip[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET, &local.sin_addr, ip, sizeof(ip));
+            printf("socket local is connected to %s:%d\n", ip, ntohs(local.sin_port));
+        }
+        else
+        {
+            printf("not connected yet: %s\n", strerror(errno));
+            return handEPOLLRDHUP(linkPeer);
+        }
+
+        len = sizeof(peer);
+        if (getpeername(linkPeer->m_fd, (struct sockaddr *)&peer, &len) == 0)
+        {   
+            char ip[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+            printf("socket is connected to %s:%d\n", ip, ntohs(peer.sin_port));
+        }
+        else
+        {
+            printf("not connected yet: %s\n", strerror(errno));
+            return handEPOLLRDHUP(linkPeer);
+        }
     }
 
-    len = sizeof(peer);
-    if (getpeername(linkPeer->m_fd, (struct sockaddr *)&peer, &len) == 0)
-    {
-        printf("socket is connected to %s:%d\n", inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
-    }
-    else
-    {
-        printf("not connected yet: %s\n", strerror(errno));
-        return handEPOLLRDHUP(linkPeer);
-    }
     bool connect = 0;
     linkPeer->setConnect(true);
     linkPeer->m_step = PEERSTEP::PEERSTEP_NORMAL;
@@ -1095,6 +1151,7 @@ int CNetworkMgr::handEPOLLRDHUP(CLinkPeer *linkPeer, int type, bool istimeOut)
         newADD->lastTime = time(NULL);
         newADD->id       = linkPeer->m_id;
         memcpy(newADD->mac, linkPeer->m_mac, 6);
+        newADD->keyPath  = linkPeer->m_keyPath;
 
         m_CriticalLink.lock();
         m_addConnect.push_back(newADD);
@@ -1122,7 +1179,8 @@ int CNetworkMgr::handEPOLLRDHUP(CLinkPeer *linkPeer, int type, bool istimeOut)
     {
         char client_ip[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, linkPeer->m_ipaddr.ipv6, client_ip, sizeof(client_ip));
-        NOTICE("socket close: " << client_ip << " port: " << htons(linkPeer->m_port) << "  function: " << __FUNCTION__ << " LINE:" << __LINE__);
+        //NOTICE("socket close: " << client_ip << " port: " << htons(linkPeer->m_port) << "  function: " << __FUNCTION__ << " LINE:" << __LINE__);
+        printf("socket close ip:[%s] port:%u, CNetworkMgr::%s line:%d\n", client_ip, htons(linkPeer->m_port), __FUNCTION__, __LINE__);
     }
     else
     {
@@ -1144,6 +1202,7 @@ void CNetworkMgr::upTimeLink(CLinkPeer *linkPeer)
 
     CLINENTLISTITER iter;
     std::time_t curTime = time(NULL);
+    g_curTime = curTime;
     m_CriticalLink.lock();
     iter = m_client.find(linkPeer);
     if (iter != m_client.end())
@@ -1159,7 +1218,7 @@ void CNetworkMgr::upTimeLink(CLinkPeer *linkPeer)
         std::pair<CLINENTLISTITER, bool> insertRet = m_client.insert(linkPeer);
         if(insertRet.second)
         {
-            linkPeer->m_iter = m_timeOut.insert(m_timeOut.end(), linkPeer);
+            linkPeer->m_iter      = m_timeOut.insert(m_timeOut.end(), linkPeer);
             linkPeer->m_alreInser = true;
         }
     }

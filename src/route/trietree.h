@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stack>
 #include <vector>
+#include <string>
 
 class TrieNode{
 public:
@@ -41,6 +42,7 @@ private:
 
 public:
     int m_user;
+    std::string m_path;
 private:
     TrieNode *root;
 

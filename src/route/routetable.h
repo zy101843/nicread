@@ -19,11 +19,13 @@ public:
     ~routetable();
 public:
     int   addRoute(std::string path, const char *mac);
+    int   setDefaultMac(const char *mac, const char *lacolmac);
     char *findRoute(uint32_t ip);
-
 private:
     ROUTEVECTOR m_routeTable;
     MACVECTOR   m_macTable;
     char        m_defaultMac[6];
+    char        m_Notfind[12];
+    char        m_Find[12];
     ROUTEITER    m_end; 
 };

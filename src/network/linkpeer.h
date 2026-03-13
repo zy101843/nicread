@@ -2,6 +2,7 @@
 #include <queue>
 #include <list>
 #include <mutex>
+#include <string>
 #include "ByteStream.h"
 #include "ByteBufMgn.h"
 
@@ -100,12 +101,13 @@ public:
     uint32_t      m_curLen;
     int           m_curMsgLen;
     std::mutex    m_Critical;
-    std::mutex    m_SendCritical;
+    std::mutex       m_SendCritical;
     std::atomic<int> m_ref;
-    void *m_linstUDP;
-    void *m_otherParam;
-    uint8_t m_mac[6];
-    uint32_t m_id;  
+    void           *m_linstUDP;
+    void           *m_otherParam;
+    uint8_t         m_mac[6];
+    uint32_t        m_id;  
+    std::string     m_keyPath;
 
 private:
     std::atomic<bool> m_connect;

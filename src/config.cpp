@@ -22,7 +22,7 @@ void generate_random_mac(unsigned char *mac) {
     for (int i = 0; i < 6; i++) {
         mac[i] = rand() % 256;
     }
-    mac[0] &= 0xFE; 
+    mac[0] &= 0xFC; 
 }
 
 bool config::readConfig(const char *path)
@@ -45,6 +45,15 @@ bool config::readConfig(const char *path)
             cli->port = node.attribute("port").as_uint();
             m_serviceips.insert(cli);
             m_sevice = true;
+            attr = node.attribute("key");
+            if(attr)
+            {
+                cli->keyPath = attr.value();
+            }
+            else 
+            {
+                cli->keyPath = "private_key.pem";
+            }
         }
         else if (strcmp(node.name(), "client") == 0)
         {
@@ -68,6 +77,7 @@ bool config::readConfig(const char *path)
             {
                 memset(cli->mac, 0, 6);
             }
+
             if (node.attribute("bindport"))
             {
                 cli->bindport = node.attribute("bindport").as_uint();
@@ -94,6 +104,16 @@ bool config::readConfig(const char *path)
             if (attr)
             {
                 cli->count = attr.as_uint();
+            }
+            attr = node.attribute("key");
+           
+            if(attr)
+            {
+                cli->keyPath = attr.value();
+            }
+            else 
+            {
+                cli->keyPath = "public_key.pem";
             }
 
             m_clients.insert(cli);

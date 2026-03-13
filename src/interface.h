@@ -2,11 +2,25 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+struct HubMidBuf
+{
+    void   *param;
+    int     type;
+    int     len ;
+    int     index;
+    uint8_t buf[2048];  
+};
+
 class midInterface
 {
 public:
+    virtual int reg(int len, void *param) = 0; 
     virtual int addData(uint8_t *data, int len, void *param) = 0;
+    virtual int addData(HubMidBuf *buf, void *param) = 0;
+    virtual HubMidBuf *getMidBuf() = 0;
+    virtual void  returnMidBuf(HubMidBuf *buf) = 0;
 };
+
 
 class Interface
 {
@@ -33,6 +47,16 @@ public:
 
 public:
     virtual int writeData(uint8_t *data, int len, int type, void *srcparam, void *dstParam) = 0;
+    virtual int writeData(uint8_t *data, int len, void *netInfo,  int type, void *srcparam, void *dstParam)
+    {
+        (void)data;
+        (void)len;
+        (void)netInfo;
+        (void)type;
+        (void)srcparam;
+        (void)dstParam;
+        return 0;
+    };
 public:
     midInterface *m_hub;
     int           m_type; /*1 nic,  2  net, 3 gateway*/

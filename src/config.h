@@ -13,6 +13,7 @@ struct ipPort
     uint8_t     mac[6];
     int         count;
     uint32_t    id;
+    std::string keyPath;
 };
 
 class config
